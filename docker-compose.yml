@@ -1,0 +1,65 @@
+version: "3.9"
+
+# =============================================================================
+# alexandria-vector-shelf-mcp — Local Development Stack
+# =============================================================================
+# Runs both services locally for development and integration testing.
+# Supabase and OpenAI are external services — they are NOT run locally.
+# Both services share environment variables from the root .env file.
+#
+# Usage:
+#   docker-compose up              # start all services
+#   docker-compose up ingestion    # start only ingestion service
+#   docker-compose up chat         # start only chat service
+#   docker-compose down            # stop all services
+#   docker-compose logs -f         # tail logs from all services
+# =============================================================================
+
+services:
+
+  # ---------------------------------------------------------------------------
+  # Ingestion Service
+  # Listens on http://localhost:8001
+  # Test with: curl -X POST http://localhost:8001/ingest -d '{...}'
+  # ---------------------------------------------------------------------------
+  ingestion:
+    build:
+      context: .
+      dockerfile: ingestion/Dockerfile
+    ports:
+      - "8001:8001"
+    env_file:
+      - .env
+    volumes:
+      # Mount shared/ so changes are reflected without rebuild
+      - ./shared:/app/shared
+      - ./ingestion:/app/ingestion
+    command: uvicorn ingestion.main:app --host 0.0.0.0 --port 8001 --reload
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8001/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # ---------------------------------------------------------------------------
+  # Chat Service
+  # Listens on http://localhost:8002
+  # Test SSE with: curl -N "http://localhost:8002/chat?book_id=...&question=..."
+  # ---------------------------------------------------------------------------
+  chat:
+    build:
+      context: .
+      dockerfile: chat/Dockerfile
+    ports:
+      - "8002:8002"
+    env_file:
+      - .env
+    volumes:
+      - ./shared:/app/shared
+      - ./chat:/app/chat
+    command: uvicorn chat.main:app --host 0.0.0.0 --port 8002 --reload
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8002/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
