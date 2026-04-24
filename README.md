@@ -4,7 +4,7 @@ A production-grade RAG pipeline for epub books, designed to evolve into a fully 
 
 Ingest any epub → query it semantically → expose your reading library as context to any LLM agent.
 
-Built as a portfolio project demonstrating RAG engineering, vector search, and agentic AI integration patterns.
+#RAG engineering #VectorSearch #agenticAIIntegrationPatterns.
 
 ---
 
