@@ -1,67 +1,104 @@
 """
 shared/db.py
 ------------
-Supabase client — singleton pattern for connection reuse.
+Firebase Admin SDK client — singleton pattern.
 
-CONCEPT: Why a singleton?
-Creating a new database connection on every request is expensive. A singleton
-ensures the client is created once at startup and reused across all requests.
-In Python, module-level variables are initialized once — importing this module
-from multiple places always returns the same client instance.
+CONCEPT: Why Firebase Admin SDK instead of the client SDK?
+There are two Firebase SDKs:
 
-CONCEPT: Service key vs Anon key
-Supabase has two types of API keys:
+  Client SDK (firebase-js-sdk, flutterfire, etc.)
+    - Used in the mobile app (NeoReader)
+    - Respects Firestore Security Rules
+    - Authenticated as the end user
 
-  ANON KEY    — safe to expose to clients (browsers, mobile apps).
-                Respects Row Level Security (RLS) policies.
-                A user can only read/write their own rows.
+  Admin SDK (firebase-admin)
+    - Used in server-side services (this file)
+    - Bypasses Firestore Security Rules completely
+    - Authenticated as a service account with full project access
+    - NEVER expose Admin SDK credentials to the client app
 
-  SERVICE KEY — bypasses RLS entirely. Has full database access.
-                NEVER expose this in client-side code.
-                Used only in server-side services (this file).
+The ingestion and chat services run server-side, so they use the Admin SDK.
+The ingestion service needs to write chunks on behalf of any user.
+The chat service needs to read chunks regardless of the requesting user's session.
 
-The ingestion and chat services run server-side, so they use the SERVICE KEY.
-The NeoReader app uses the ANON KEY via the official Supabase JS SDK.
+CONCEPT: Application Default Credentials (ADC)
+In local development, we point to a service-account.json file via
+GOOGLE_APPLICATION_CREDENTIALS environment variable.
+
+In production (Cloud Run), we do NOT set this variable. Cloud Run automatically
+provides credentials via the attached service account — no JSON file needed.
+This is called Application Default Credentials and is the recommended pattern.
 """
 
 import os
 
-from supabase import Client, create_client
+import firebase_admin
+from firebase_admin import credentials, firestore, storage
+from google.cloud.firestore_v1 import AsyncClient
 
+# ---------------------------------------------------------------------------
+# Firebase app initialization — happens once at module import time
+# ---------------------------------------------------------------------------
 
-def _create_supabase_client() -> Client:
+def _initialize_firebase() -> firebase_admin.App:
     """
-    Creates and returns a Supabase client using environment variables.
+    Initializes the Firebase Admin SDK app.
 
-    Raises:
-        ValueError: If required environment variables are not set.
-                    Fails loudly at startup rather than silently at query time.
+    In local development: uses service-account.json pointed to by
+    GOOGLE_APPLICATION_CREDENTIALS environment variable.
+
+    In Cloud Run production: uses Application Default Credentials
+    automatically — no env var needed.
     """
-    url = os.environ.get("SUPABASE_URL")
-    key = os.environ.get("SUPABASE_SERVICE_KEY")
+    if firebase_admin._apps:
+        # Already initialized — return existing app
+        return firebase_admin.get_app()
 
-    if not url:
+    project_id = os.environ.get("GOOGLE_CLOUD_PROJECT")
+    if not project_id:
         raise ValueError(
-            "SUPABASE_URL environment variable is not set. "
+            "GOOGLE_CLOUD_PROJECT environment variable is not set. "
             "Check your .env file."
         )
-    if not key:
-        raise ValueError(
-            "SUPABASE_SERVICE_KEY environment variable is not set. "
-            "Check your .env file. "
-            "Note: use the SERVICE KEY here, not the anon key."
-        )
 
-    return create_client(url, key)
+    cred_path = os.environ.get("GOOGLE_APPLICATION_CREDENTIALS")
 
+    if cred_path and os.path.exists(cred_path):
+        # Local development: explicit service account file
+        cred = credentials.Certificate(cred_path)
+    else:
+        # Cloud Run production: Application Default Credentials
+        cred = credentials.ApplicationDefault()
+
+    return firebase_admin.initialize_app(cred, {
+        "projectId": project_id,
+        "storageBucket": os.environ.get("FIREBASE_STORAGE_BUCKET"),
+    })
+
+
+# Initialize once at import time
+_app = _initialize_firebase()
 
 # ---------------------------------------------------------------------------
-# Module-level singleton
+# Module-level singletons
 # ---------------------------------------------------------------------------
 
-# This is created once when the module is first imported.
-# All services import `supabase` from this module.
-supabase: Client = _create_supabase_client()
+# Firestore async client — used for all database operations
+# CONCEPT: AsyncClient vs Client
+# We use the async client because our FastAPI endpoints are async.
+# Mixing sync Firestore calls inside async FastAPI handlers causes
+# thread-blocking — the async client avoids this.
+db: AsyncClient = firestore.AsyncClient(
+    project=os.environ.get("GOOGLE_CLOUD_PROJECT"),
+    database=os.environ.get("FIRESTORE_DATABASE_ID", "(default)"),
+)
+
+# Firebase Storage bucket reference — used by ingestion to download epubs
+storage_bucket = storage.bucket()
+
+# Collection name constants — change via environment variables if needed
+BOOKS_COLLECTION = os.environ.get("FIRESTORE_BOOKS_COLLECTION", "books")
+CHUNKS_COLLECTION = os.environ.get("FIRESTORE_CHUNKS_COLLECTION", "chunks")
 
 
 # ---------------------------------------------------------------------------
@@ -71,20 +108,16 @@ supabase: Client = _create_supabase_client()
 
 async def get_book(book_id: str) -> dict | None:
     """
-    Fetches a single book record by ID.
+    Fetches a single book document by ID.
 
     Returns None if the book does not exist.
-    The service key bypasses RLS, so this returns results regardless of user_id.
-    The caller is responsible for verifying ownership if needed.
+    The Admin SDK bypasses Security Rules — the caller is responsible
+    for verifying ownership if needed.
     """
-    response = (
-        supabase.table("books")
-        .select("*")
-        .eq("id", book_id)
-        .single()
-        .execute()
-    )
-    return response.data
+    doc = await db.collection(BOOKS_COLLECTION).document(book_id).get()
+    if not doc.exists:
+        return None
+    return {"id": doc.id, **doc.to_dict()}
 
 
 async def update_book_status(
@@ -96,16 +129,22 @@ async def update_book_status(
     """
     Updates the processing status of a book.
 
-    This triggers a Supabase Realtime event that the client app listens to,
-    enabling real-time status updates without polling.
+    This write triggers a Firestore Realtime event. The NeoReader app
+    subscribes to this document and receives the update instantly via
+    WebSocket — no polling required.
 
     Args:
-        book_id       : UUID of the book to update
-        status        : new status string (use BookStatus enum values)
-        chunk_count   : total number of chunks stored (set when status = "ready")
-        error_message : error details (set when status = "error")
+        book_id       : Firestore document ID of the book
+        status        : new status ("pending" | "processing" | "ready" | "error")
+        chunk_count   : total chunks stored — set when status = "ready"
+        error_message : error details — set when status = "error"
     """
-    payload: dict = {"status": status, "updated_at": "now()"}
+    from google.cloud import firestore as _fs
+
+    payload: dict = {
+        "status": status,
+        "updated_at": _fs.SERVER_TIMESTAMP,
+    }
 
     if chunk_count is not None:
         payload["chunk_count"] = chunk_count
@@ -113,4 +152,6 @@ async def update_book_status(
     if error_message is not None:
         payload["error_message"] = error_message
 
-    supabase.table("books").update(payload).eq("id", book_id).execute()
+    await db.collection(BOOKS_COLLECTION)\
+            .document(book_id)\
+            .update(payload)

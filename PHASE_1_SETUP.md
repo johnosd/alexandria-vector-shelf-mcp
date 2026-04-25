@@ -1,170 +1,273 @@
 # Phase 1 — Foundation Setup Guide
 
-This guide walks through every step of Phase 1 in order.
+This guide walks through every setup step for Phase 1 in order.
 Complete each section before moving to the next.
+At the end you will have a fully configured Firebase project, Firestore ready for
+vector search, and the repository skeleton committed to GitHub.
+
+---
+
+## Prerequisites
+
+Install these tools before starting:
+
+```bash
+# Google Cloud CLI
+brew install google-cloud-sdk        # macOS
+# or follow: https://cloud.google.com/sdk/docs/install
+
+# Firebase CLI
+npm install -g firebase-tools
+
+# Python 3.11
+brew install python@3.11
+
+# Docker
+# Download from https://www.docker.com/products/docker-desktop
+```
 
 ---
 
 ## Step 1: Create the GitHub repository
 
 ```bash
-# Create the repository on GitHub (public, no template)
-# Then clone it locally:
+# Create repository on GitHub: public, name "alexandria-vector-shelf-mcp", no template
+# Then clone locally:
 git clone https://github.com/<your-username>/alexandria-vector-shelf-mcp.git
 cd alexandria-vector-shelf-mcp
 ```
 
-Copy all files from this deliverable into the cloned repository.
+Copy all project files into the cloned repository, then:
 
 ```bash
 git add .
-git commit -m "feat: Phase 1 foundation — schema, shared modules, project structure"
+git commit -m "feat: Phase 1 foundation — project structure, Firestore schema, shared modules"
 git push origin main
 ```
 
 ---
 
-## Step 2: Create the Supabase project
+## Step 2: Create the Google Cloud / Firebase project
 
-1. Go to [https://app.supabase.com](https://app.supabase.com) and sign in
-2. Click **New project**
+1. Go to [https://console.firebase.google.com](https://console.firebase.google.com)
+2. Click **Add project**
 3. Name: `alexandria-vector-shelf-mcp`
-4. Database password: generate a strong one and save it
-5. Region: choose the closest to you (South America — São Paulo if available)
-6. Wait ~2 minutes for the project to provision
+4. Disable Google Analytics (not needed for this project)
+5. Click **Create project** — wait ~1 minute
+
+Note your **Project ID** (shown in project settings) — you will need it in every
+gcloud and Firebase CLI command.
 
 ---
 
-## Step 3: Configure Supabase Storage
+## Step 3: Enable Firestore
 
-1. In your Supabase project, go to **Storage**
-2. Click **New bucket**
-3. Name: `epubs`
-4. Toggle: **Private** (not public — epubs should only be accessible via signed URLs)
-5. Click **Save**
-
----
-
-## Step 4: Run the database schema
-
-1. In your Supabase project, go to **SQL Editor**
-2. Click **New query**
-3. Copy the entire contents of `docs/schema.sql`
-4. Click **Run**
-5. Verify in **Table Editor** that you can see the `books` and `chunks` tables
-
-**Expected output:** No errors. Two tables visible in Table Editor.
+1. In Firebase console → **Build** → **Firestore Database**
+2. Click **Create database**
+3. Select **Native mode** (not Datastore mode — vector search requires Native mode)
+4. Select region: `us-central1` (or your closest region)
+5. Click **Done**
 
 ---
 
-## Step 5: Configure environment variables
+## Step 4: Enable Firebase Auth
+
+1. In Firebase console → **Build** → **Authentication**
+2. Click **Get started**
+3. Enable **Anonymous** sign-in (Settings → Sign-in method → Anonymous → Enable)
+4. Optionally enable **Google** sign-in for later phases
+
+Anonymous auth gives every user a `uid` without requiring a login screen.
+This provides the `user_id` needed to isolate each user's chunks in Firestore.
+
+---
+
+## Step 5: Create Firebase Storage bucket
+
+1. In Firebase console → **Build** → **Storage**
+2. Click **Get started**
+3. Select **Start in production mode** (we will write security rules manually)
+4. Select same region as Firestore: `us-central1`
+
+Storage is used to hold the original `.epub` files. The ingestion service downloads
+them from Storage via a signed URL.
+
+---
+
+## Step 6: Deploy Firestore Security Rules
+
+Create `firestore.rules` in the project root:
+
+```javascript
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    match /users/{userId} {
+      allow read, write: if request.auth != null
+                         && request.auth.uid == userId;
+    }
+
+    match /books/{bookId} {
+      allow read, write: if request.auth != null
+                         && request.auth.uid == resource.data.user_id;
+      allow create: if request.auth != null
+                    && request.auth.uid == request.resource.data.user_id;
+    }
+
+    match /chunks/{chunkId} {
+      allow read: if request.auth != null
+                  && request.auth.uid == resource.data.user_id;
+      allow write: if false;  // server-side only via Admin SDK
+    }
+  }
+}
+```
+
+Deploy:
+```bash
+firebase login
+firebase use <your-project-id>
+firebase deploy --only firestore:rules
+```
+
+---
+
+## Step 7: Create the Firestore vector index
+
+This is the most important setup step. Without this index, the retriever will fail.
+
+```bash
+# Authenticate with gcloud
+gcloud auth login
+gcloud config set project <your-project-id>
+
+# Create the composite vector index
+gcloud firestore indexes composite create \
+  --collection-group=chunks \
+  --query-scope=COLLECTION \
+  --field-config=order=ASCENDING,field-path="book_id" \
+  --field-config=field-path="embedding",vector-config='{"dimension":"1536","flat":"{}"}' \
+  --database="(default)"
+```
+
+Index creation takes 5–15 minutes. Check status:
+```bash
+gcloud firestore indexes composite list
+```
+
+Wait until status shows `READY` before proceeding to Phase 2.
+
+**Note on dimension:** `1536` matches `text-embedding-3-small` (OpenAI) and can also be
+used with Vertex AI `text-embedding-004` (which supports configurable output dimensions).
+If you later switch to a different model with a different dimension, you must delete this
+index and create a new one.
+
+---
+
+## Step 8: Download service account credentials
+
+For local development, the services authenticate with a service account JSON file.
+
+1. Firebase console → **Project settings** (gear icon) → **Service accounts**
+2. Click **Generate new private key**
+3. Save as `service-account.json` in the project root
+4. **Add `service-account.json` to `.gitignore` immediately** — it must never be committed
+
+```bash
+echo "service-account.json" >> .gitignore
+git add .gitignore
+git commit -m "chore: ensure service account key is gitignored"
+```
+
+In production (Cloud Run), services use the attached service account automatically
+via Application Default Credentials — the JSON file is only needed locally.
+
+---
+
+## Step 9: Configure environment variables
 
 ```bash
 cp .env.example .env
 ```
 
-Open `.env` and fill in:
+Fill in `.env`:
 
-| Variable | Where to find it |
-|---|---|
-| `SUPABASE_URL` | Supabase → Settings → API → Project URL |
-| `SUPABASE_SERVICE_KEY` | Supabase → Settings → API → service_role key |
-| `SUPABASE_ANON_KEY` | Supabase → Settings → API → anon public key |
-| `OPENAI_API_KEY` | https://platform.openai.com/api-keys |
+```bash
+GOOGLE_CLOUD_PROJECT=<your-project-id>
+FIREBASE_STORAGE_BUCKET=<your-project-id>.appspot.com
+GOOGLE_APPLICATION_CREDENTIALS=./service-account.json
 
-Leave all other variables at their defaults for now.
+# Choose embedding provider (start with OpenAI — simpler setup)
+OPENAI_API_KEY=<your-openai-key>
+EMBEDDING_MODEL=text-embedding-3-small
+
+# LLM
+GEMINI_API_KEY=<your-gemini-key>   # get at https://aistudio.google.com/apikey
+
+ENVIRONMENT=development
+CHUNK_SIZE=500
+CHUNK_OVERLAP=50
+RETRIEVAL_TOP_K=5
+```
 
 ---
 
-## Step 6: Verify the database connection
+## Step 10: Verify the setup
 
-Create a quick test script to verify everything is connected:
+Run this script from the project root to verify Firestore connectivity:
 
 ```python
-# test_connection.py — run this from the project root
-# python test_connection.py
-
+# verify_setup.py
 import os
 from dotenv import load_dotenv
 
 load_dotenv()
+os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = "./service-account.json"
 
-from shared.db import supabase
+import firebase_admin
+from firebase_admin import credentials, firestore
 
-# Try to list tables (should return empty list, not an error)
-response = supabase.table("books").select("id").limit(1).execute()
-print("Connection successful!")
-print(f"Books table accessible: {response.data is not None}")
+cred = credentials.Certificate("./service-account.json")
+firebase_admin.initialize_app(cred)
+db = firestore.client()
 
-response = supabase.table("chunks").select("id").limit(1).execute()
-print(f"Chunks table accessible: {response.data is not None}")
+# Write a test document
+db.collection("_setup_test").document("ping").set({"status": "ok"})
+doc = db.collection("_setup_test").document("ping").get()
+print(f"Firestore connected: {doc.to_dict()}")
+
+# Clean up
+db.collection("_setup_test").document("ping").delete()
+print("Setup verified successfully. Ready for Phase 2.")
+```
+
+```bash
+python verify_setup.py
 ```
 
 **Expected output:**
 ```
-Connection successful!
-Books table accessible: True
-Chunks table accessible: True
-```
-
----
-
-## Step 7: Enable Supabase Realtime
-
-1. In your Supabase project, go to **Database → Replication**
-2. Find the `books` table
-3. Toggle **Insert**, **Update**, **Delete** to ON
-4. This enables the client app to receive live status updates
-
-Alternatively, the `schema.sql` already contains:
-```sql
-alter publication supabase_realtime add table books;
-```
-This runs automatically when you execute the schema.
-
----
-
-## Step 8: Verify the schema
-
-Run this query in the SQL Editor to verify all objects were created correctly:
-
-```sql
--- Check tables exist
-select table_name
-from information_schema.tables
-where table_schema = 'public'
-order by table_name;
--- Expected: books, chunks
-
--- Check pgvector extension is enabled
-select extname from pg_extension where extname = 'vector';
--- Expected: one row with "vector"
-
--- Check the match_chunks function exists
-select routine_name
-from information_schema.routines
-where routine_schema = 'public' and routine_name = 'match_chunks';
--- Expected: one row with "match_chunks"
-
--- Check indexes exist
-select indexname from pg_indexes
-where tablename in ('books', 'chunks')
-order by indexname;
--- Expected: chunks_book_id_idx, chunks_embedding_idx, plus primary key indexes
+Firestore connected: {'status': 'ok'}
+Setup verified successfully. Ready for Phase 2.
 ```
 
 ---
 
 ## Phase 1 complete ✅
 
-At the end of Phase 1 you should have:
+Checklist before moving to Phase 2:
 
 - [ ] GitHub repository created and pushed
-- [ ] Supabase project provisioned
-- [ ] `epubs` storage bucket created (private)
-- [ ] Schema deployed (`books`, `chunks`, `match_chunks` function, RLS policies)
+- [ ] Firebase project created (`alexandria-vector-shelf-mcp`)
+- [ ] Firestore in Native mode, region `us-central1`
+- [ ] Firebase Auth enabled (Anonymous)
+- [ ] Firebase Storage bucket created
+- [ ] Firestore Security Rules deployed
+- [ ] Vector index created (status: READY)
+- [ ] Service account JSON downloaded and gitignored
 - [ ] `.env` filled with real credentials
-- [ ] Database connection verified with test script
-- [ ] Realtime enabled on `books` table
+- [ ] `verify_setup.py` runs successfully
 
-**Next:** Phase 2 — Ingestion Service (`ingestion/parser.py`, `ingestion/chunker.py`, `ingestion/embedder.py`, `ingestion/store.py`)
+**Next:** Phase 2 — Ingestion Service
+(`ingestion/parser.py` → `ingestion/chunker.py` → `ingestion/embedder.py` → `ingestion/store.py`)

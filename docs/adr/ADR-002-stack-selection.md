@@ -11,90 +11,136 @@ Accepted
 alexandria-vector-shelf-mcp is a backend system with two independent microservices:
 
 1. **Ingestion Service** — processes epub files (parse, chunk, embed, store).
-   Called once per book upload. Processing takes 10–60 seconds depending on book size.
-   No latency requirements at call time — the user is shown a "processing" status.
+   Called once per book upload. Processing takes 10–60 seconds.
+   No latency requirement at call time — user sees a "processing" status screen.
 
-2. **Chat Service** — answers questions about a book using RAG.
+2. **Chat Service** — answers questions using RAG.
    Called on every user message. Latency is critical — cold starts are unacceptable.
 
-Constraints:
-- Minimum possible cost (single user, personal project)
-- Python ecosystem (author's primary language)
+Strategic constraint: **everything must run within the Google Cloud / Firebase ecosystem.**
+One account, one console, one IAM, one billing dashboard. No external services.
+
+Additional constraints:
+- Minimum possible cost (single user, personal/portfolio project)
+- Python 3.11 (author's primary language)
 - No unnecessary frameworks or abstractions
-- Code must be readable and debuggable by someone learning RAG engineering
+- Code must be readable by someone learning RAG engineering
 
 ## Decisions
 
+### Platform: 100% Google Cloud / Firebase
+
+All services run within a single GCP project. This means:
+- Firebase Auth for user identity
+- Firebase Storage for epub files
+- Firestore for chunks, embeddings, and book status (with Realtime built in)
+- Cloud Run for both ingestion and chat compute
+- Vertex AI for embeddings (or OpenAI as fallback — same interface)
+- Gemini for LLM generation
+
+This eliminates Supabase, Fly.io, Railway, and any other external dependency.
+
+**Tradeoff accepted:** Firebase/Firestore has a steeper initial learning curve than
+Supabase for developers coming from a SQL background. This is offset by the benefit
+of mastering the GCP ecosystem end-to-end, which is valuable for portfolio positioning.
+
 ### Language: Python 3.11
-Python has the richest ecosystem for AI/ML engineering. `asyncio` support in 3.11
-is mature and stable. All relevant libraries (httpx, openai, supabase-py, fastapi,
-ebooklib, beautifulsoup4) have first-class Python support.
+Rich AI/ML ecosystem. Mature asyncio support. First-class SDKs for Firebase Admin,
+Google Cloud, and OpenAI.
 
 ### API Framework: FastAPI
-FastAPI provides async request handling, automatic OpenAPI documentation, Pydantic
-validation, and native Server-Sent Events (SSE) support. It is the standard choice
-for Python AI services.
+Async request handling, automatic OpenAPI docs, Pydantic validation, native SSE support.
+Standard for Python AI services.
 
-**Rejected:** Flask (no async), Django (too heavy), raw ASGI (too low-level)
+**Rejected:** Flask (no async), Django (too heavy)
 
-### Ingestion Compute: Google Cloud Run
-Cloud Run is serverless — the container spins up on request and shuts down when idle.
-For a service that is called at most a few times per day, this means near-zero cost.
-Cold start of 3–8 seconds is acceptable for the ingestion use case.
+### Ingestion Compute: Cloud Run (serverless, no minimum instances)
+Serverless — spins up on request, shuts down when idle. Near-zero cost for a service
+called a few times per day. Cold start (3–8s) is acceptable for ingestion since the
+user is already waiting for processing.
 
-**Rejected:** Always-on VPS (unnecessary cost for an infrequently called service),
-AWS Lambda (Python cold start worse than Cloud Run, less memory for epub processing)
+**Pub/Sub readiness:** The `process_epub()` function is designed so that Google Cloud
+Pub/Sub can invoke it as a consumer later without internal changes. See ADR-002 note
+on future evolution.
 
-### Chat Compute: Fly.io
-The chat service must have no cold start. An always-on container is required.
-Fly.io provides a free tier with one always-on container and has excellent
-latency characteristics for streaming workloads.
+### Chat Compute: Cloud Run (always-on via min-instances=1)
+Cold start is unacceptable for chat. Cloud Run supports `--min-instances=1`, which
+keeps one container always warm. Cost is approximately $5-8/month for a small instance
+kept alive — equivalent to Fly.io but within the same GCP account.
+
+```bash
+gcloud run deploy chat-service \
+  --min-instances=1 \
+  --max-instances=10 \
+  ...
+```
 
 **Rejected:**
-- Hugging Face Spaces: free tier sleeps after inactivity, defeating the purpose
-- Cloud Run: cold start unacceptable for chat latency
-- Railway: viable alternative to Fly.io, similar cost (~$5/month)
+- Cloud Run with 0 min instances: cold start kills chat UX
+- Cloud Functions: less control over runtime, no persistent connections for SSE
+- GKE: massive overkill for single-user MVP
+
+### Embeddings: Vertex AI text-embedding-004 (primary) / OpenAI (fallback)
+
+Vertex AI `text-embedding-004` produces 768-dimensional vectors by default,
+configurable up to 3072 dimensions. It runs within GCP — no data leaves the network.
+The `embedder.py` module abstracts the provider so switching is a one-line config change.
+
+**Important constraint:** The embedding model must never change after the first ingestion.
+All stored vectors and all query-time embeddings must use the same model.
+See `.env.example` — `EMBEDDING_MODEL` is set once and treated as immutable.
+
+**OpenAI text-embedding-3-small as fallback:** If Vertex AI quotas are an issue during
+development, OpenAI's model produces 1536 dimensions and is also supported. The interface
+in `embedder.py` is identical for both.
+
+### LLM: Gemini 1.5 Flash
+Cheapest capable Google model. Excellent for RAG-style prompts where the answer is
+grounded in retrieved context. Native GCP integration — no separate API key needed
+beyond Application Default Credentials.
+
+**Rejected:**
+- GPT-4o-mini: works well but adds an external API dependency (OpenAI)
+- Gemini Ultra: overkill and expensive for a chat-with-book use case
+- Gemini Nano: not available via API
 
 ### RAG Framework: None (direct API calls)
-LangChain and LlamaIndex were evaluated and rejected for this project.
+LangChain and LlamaIndex were evaluated and rejected.
 
 Reasons:
-- The RAG pipeline is simple enough (4 sequential steps) to not need orchestration
-- Frameworks add abstraction layers that make debugging harder
-- LangChain's API has broken compatibility between versions multiple times
-- Direct API calls give full control over chunking strategy, which is the most
-  critical factor in RAG quality
-- When migrating from pgvector to Weaviate, only `retriever.py` changes — no
-  framework migration required
-
-The system uses `openai` Python SDK, `httpx` for async HTTP, and `supabase-py`
-for database operations. Total dependencies are minimal.
+- The RAG pipeline is 4 sequential steps — no orchestration framework needed
+- Direct API calls give full control over chunking strategy (most critical RAG variable)
+- Frameworks add abstraction layers that make debugging harder for someone learning RAG
+- LangChain has broken API compatibility multiple times between versions
+- The `retriever.py` interface pattern achieves the same decoupling without a framework
 
 ### Epub Processing: EbookLib + BeautifulSoup4
-EbookLib is the standard Python library for reading epub files. BeautifulSoup4
-is used to strip HTML tags from epub chapters, which are HTML documents internally.
-
-**Rejected:** Tika (Java dependency, overkill), Calibre (binary tool, hard to
-containerize), pypdf (PDF only)
+EbookLib is the standard Python library for epub. BeautifulSoup4 strips HTML from
+epub chapters (which are HTML documents internally). Both are mature and well-maintained.
 
 ## Consequences
 
 ### Positive
-- Minimal cost: Cloud Run + Fly.io free tiers cover single-user MVP at ~$0/month
-- Full control over every step of the pipeline
-- Easy to read, debug, and explain in a portfolio context
-- No framework migration debt when scaling
+- Single GCP account covers everything — one dashboard, one IAM, one bill
+- No data leaves GCP at any point in the pipeline
+- Portfolio demonstrates full GCP ecosystem mastery
+- Cloud Run min-instances solves cold start without a separate always-on server
+- Firebase Security Rules + Firebase Auth provide solid multi-user isolation
+  when the project grows beyond single-user
 
 ### Negative
-- More boilerplate than framework-based approaches
-- SSE streaming requires manual implementation (not a framework abstraction)
-- Cloud Run cold starts require client-side handling (status polling via Realtime)
+- Firestore is a document database — no SQL, no JOINs, no complex aggregations
+- Cloud Run min-instances costs ~$5-8/month (versus $0 with Fly.io free tier)
+- Vertex AI embeddings have regional availability constraints
+- Firebase Admin SDK (Python) is less ergonomic than supabase-py for some operations
 
 ### Future evolution
-When the project scales beyond single-user:
-- Chat Service: migrate to a VPS with more resources or Kubernetes
-- Ingestion: add Google Cloud Pub/Sub before Cloud Run for queue management
-  (the `process_epub()` function signature is already designed for this — it can
-  become a Pub/Sub consumer without internal changes)
-- MCP Server (Phase 5): new `mcp/` module added on top of existing infrastructure,
-  no changes to existing services
+- **Pub/Sub:** Add Cloud Pub/Sub between the NeoReader app and Cloud Run ingestion
+  when concurrent users require queue management. `process_epub()` becomes a Pub/Sub
+  consumer with zero internal changes.
+- **Vector search:** Migrate from Firestore vector search to Weaviate (on GKE or cloud)
+  when hybrid search (BM25 + vector) becomes necessary. Only `retriever.py` changes.
+- **MCP Server (Phase 5):** New `mcp/` module added on top of existing infrastructure.
+  No changes to ingestion or chat services.
+- **Scale:** Cloud Run auto-scales horizontally. Firestore scales automatically.
+  The architecture supports growth without infrastructure rewrites.

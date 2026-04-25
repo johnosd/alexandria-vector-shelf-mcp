@@ -1,29 +1,29 @@
 # =============================================================================
 # alexandria-vector-shelf-mcp — Makefile
 # =============================================================================
-# Standardized commands for development, testing, and deployment.
-# All commands assume you have Docker and Python 3.11+ installed.
-#
-# Usage:
-#   make setup        prepare local environment
-#   make dev          start all services locally
-#   make test         run all tests
-#   make ingest       test ingestion pipeline with a local epub
-# =============================================================================
 
-.PHONY: setup dev test lint ingest chat clean help
+.PHONY: setup dev dev-ingestion dev-chat test test-unit test-integration lint format ingest chat clean help
 
-# Default target
 help:
 	@echo ""
 	@echo "alexandria-vector-shelf-mcp — available commands"
 	@echo ""
-	@echo "  make setup       Install dependencies and prepare environment"
-	@echo "  make dev         Start all services with docker-compose"
-	@echo "  make test        Run all tests"
-	@echo "  make lint        Run ruff linter across all services"
-	@echo "  make ingest      Test ingestion (requires EPUB, BOOK_ID, USER_ID)"
-	@echo "  make clean       Remove __pycache__ and .pyc files"
+	@echo "  make setup            Install dependencies and copy .env"
+	@echo "  make dev              Start all services (docker-compose)"
+	@echo "  make dev-ingestion    Start ingestion service only"
+	@echo "  make dev-chat         Start chat service only"
+	@echo "  make test             Run all tests"
+	@echo "  make test-unit        Run unit tests only (no Firebase)"
+	@echo "  make test-integration Run integration tests (requires Firebase)"
+	@echo "  make lint             Lint all Python files with ruff"
+	@echo "  make format           Format all Python files with ruff"
+	@echo "  make ingest           Test ingestion via curl (see usage below)"
+	@echo "  make index            Create Firestore vector index via gcloud"
+	@echo "  make clean            Remove __pycache__ and temp files"
+	@echo ""
+	@echo "Usage examples:"
+	@echo "  make ingest EPUB_URL=https://... BOOK_ID=abc123 USER_ID=uid456"
+	@echo "  make chat BOOK_ID=abc123 USER_ID=uid456 QUESTION='What is this about?'"
 	@echo ""
 
 # ---------------------------------------------------------------------------
@@ -32,10 +32,15 @@ help:
 
 setup:
 	@echo "Setting up local environment..."
-	cp -n .env.example .env || true
+	cp -n .env.example .env || echo ".env already exists, skipping"
 	pip install -r ingestion/requirements.txt
 	pip install -r chat/requirements.txt
-	@echo "Done. Fill in .env with your Supabase and OpenAI credentials."
+	@echo ""
+	@echo "Done. Next steps:"
+	@echo "  1. Fill in .env with your Firebase and API credentials"
+	@echo "  2. Download service-account.json from Firebase console"
+	@echo "  3. Run: make index  (creates Firestore vector index)"
+	@echo "  4. Run: python verify_setup.py"
 
 # ---------------------------------------------------------------------------
 # Development
@@ -51,6 +56,21 @@ dev-chat:
 	docker-compose up --build chat
 
 # ---------------------------------------------------------------------------
+# Firestore index creation (run once before Phase 2)
+# ---------------------------------------------------------------------------
+
+index:
+	@test -n "$(GOOGLE_CLOUD_PROJECT)" || (echo "Error: GOOGLE_CLOUD_PROJECT is not set in your environment" && exit 1)
+	gcloud firestore indexes composite create \
+		--collection-group=chunks \
+		--query-scope=COLLECTION \
+		--field-config=order=ASCENDING,field-path="book_id" \
+		--field-config=field-path="embedding",vector-config='{"dimension":"1536","flat":"{}"}' \
+		--database="(default)" \
+		--project=$(GOOGLE_CLOUD_PROJECT)
+	@echo "Index creation started. Check status with: gcloud firestore indexes composite list"
+
+# ---------------------------------------------------------------------------
 # Testing
 # ---------------------------------------------------------------------------
 
@@ -58,46 +78,38 @@ test:
 	pytest tests/ -v --tb=short
 
 test-unit:
-	pytest tests/ -v --tb=short -m "not integration"
+	pytest tests/ -v --tb=short -m "unit"
 
 test-integration:
-	pytest tests/ -v --tb=short -m integration
+	pytest tests/ -v --tb=short -m "integration"
 
 # ---------------------------------------------------------------------------
 # Code quality
 # ---------------------------------------------------------------------------
 
 lint:
-	ruff check ingestion/ chat/ shared/ mcp/
+	ruff check ingestion/ chat/ shared/ mcp/ tests/
 
 format:
-	ruff format ingestion/ chat/ shared/ mcp/
+	ruff format ingestion/ chat/ shared/ mcp/ tests/
 
 # ---------------------------------------------------------------------------
-# Manual pipeline testing
-# ---------------------------------------------------------------------------
-# Test the ingestion pipeline end-to-end via curl.
-# Requires a running ingestion service (make dev-ingestion).
-#
-# Usage:
-#   make ingest EPUB_URL=https://... BOOK_ID=<uuid> USER_ID=<uuid>
+# Manual pipeline testing via curl
 # ---------------------------------------------------------------------------
 
 ingest:
-	@test -n "$(EPUB_URL)" || (echo "Error: EPUB_URL is required. Usage: make ingest EPUB_URL=https://... BOOK_ID=<uuid> USER_ID=<uuid>" && exit 1)
-	@test -n "$(BOOK_ID)" || (echo "Error: BOOK_ID is required." && exit 1)
-	@test -n "$(USER_ID)" || (echo "Error: USER_ID is required." && exit 1)
+	@test -n "$(EPUB_URL)"  || (echo "Error: EPUB_URL required.  Usage: make ingest EPUB_URL=... BOOK_ID=... USER_ID=..." && exit 1)
+	@test -n "$(BOOK_ID)"   || (echo "Error: BOOK_ID required." && exit 1)
+	@test -n "$(USER_ID)"   || (echo "Error: USER_ID required." && exit 1)
 	curl -s -X POST http://localhost:8001/ingest \
 		-H "Content-Type: application/json" \
-		-d '{"epub_url": "$(EPUB_URL)", "book_id": "$(BOOK_ID)", "user_id": "$(USER_ID)"}' \
+		-d '{"epub_url":"$(EPUB_URL)","book_id":"$(BOOK_ID)","user_id":"$(USER_ID)"}' \
 		| python3 -m json.tool
 
-# Test the chat service with a sample question.
-# Usage: make chat BOOK_ID=<uuid> USER_ID=<uuid> QUESTION="What is this book about?"
 chat:
-	@test -n "$(BOOK_ID)" || (echo "Error: BOOK_ID is required." && exit 1)
-	@test -n "$(USER_ID)" || (echo "Error: USER_ID is required." && exit 1)
-	@test -n "$(QUESTION)" || (echo "Error: QUESTION is required." && exit 1)
+	@test -n "$(BOOK_ID)"   || (echo "Error: BOOK_ID required.  Usage: make chat BOOK_ID=... USER_ID=... QUESTION=..." && exit 1)
+	@test -n "$(USER_ID)"   || (echo "Error: USER_ID required." && exit 1)
+	@test -n "$(QUESTION)"  || (echo "Error: QUESTION required." && exit 1)
 	curl -N "http://localhost:8002/chat?book_id=$(BOOK_ID)&user_id=$(USER_ID)&question=$(QUESTION)"
 
 # ---------------------------------------------------------------------------
@@ -108,3 +120,4 @@ clean:
 	find . -type d -name __pycache__ -exec rm -rf {} + 2>/dev/null || true
 	find . -name "*.pyc" -delete 2>/dev/null || true
 	find . -name ".pytest_cache" -exec rm -rf {} + 2>/dev/null || true
+	find . -name ".ruff_cache" -exec rm -rf {} + 2>/dev/null || true

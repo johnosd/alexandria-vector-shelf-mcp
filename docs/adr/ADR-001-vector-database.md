@@ -8,69 +8,123 @@ Accepted
 
 ## Context
 
-The alexandria-vector-shelf-mcp system needs a vector database to store and query text embeddings generated
-from epub book content. Each chunk of text is converted to a 1536-dimensional vector using
-OpenAI's `text-embedding-3-small` model, then stored for similarity search at query time.
+The alexandria-vector-shelf-mcp system needs a vector database to store and query text embeddings
+generated from epub book content. Each chunk of text is converted to a vector using an embedding
+model (1536 dimensions), then stored for similarity search at query time.
 
-Requirements for the MVP stage:
-- Store vectors of dimension 1536 (OpenAI text-embedding-3-small output)
+Requirements:
+- Store vectors of dimension 1536
 - Filter by `book_id` and `user_id` on every query
-- Similarity search returning top-k most relevant chunks
-- Free tier that does not expire (single user, personal portfolio project)
-- Minimal operational overhead
-
-Desirable but not required for MVP:
-- Hybrid search (semantic + keyword/BM25)
-- High performance at scale (>1M vectors)
+- K-nearest neighbor (KNN) similarity search returning top-k chunks
+- Free tier that does not expire (single user, personal/portfolio project)
+- Minimum operational overhead
+- Preference for staying within the Google Cloud / Firebase ecosystem
 
 ## Decision
 
-Use **Supabase pgvector** as the vector database for Phases 1–4.
+Use **Firestore vector search** (native KNN capability within Cloud Firestore) as the
+vector database for Phases 1–4.
 
-pgvector is a PostgreSQL extension that adds vector storage and similarity search.
-Supabase provides a managed PostgreSQL instance with pgvector enabled, along with
-Auth, Storage, and Realtime — all on the same free tier.
+Firestore added native vector embedding support with K-nearest neighbor (KNN) search,
+allowing vector fields to be stored in documents and queried using cosine, Euclidean,
+or dot product distance measures. This keeps the entire system — auth, storage, realtime
+updates, and vector search — within a single Firebase/GCP project and billing account.
+
+### How it works in practice
+
+Vectors are stored as a native Firestore `Vector` type in each chunk document:
+
+```python
+from google.cloud.firestore_v1.vector import Vector
+from google.cloud.firestore_v1.base_vector_query import DistanceMeasure
+
+# storing a chunk with its embedding
+doc = {
+    "book_id": book_id,
+    "user_id": user_id,
+    "content": chunk_text,
+    "embedding": Vector(embedding_list),   # native Firestore vector type
+    "chunk_index": index,
+    "chapter": chapter_title,
+}
+db.collection("chunks").add(doc)
+
+# querying — filter by book_id then KNN search
+results = db.collection("chunks")\
+    .where("book_id", "==", book_id)\
+    .find_nearest(
+        vector_field="embedding",
+        query_vector=Vector(question_embedding),
+        distance_measure=DistanceMeasure.COSINE,
+        limit=top_k
+    ).stream()
+```
+
+A composite vector index must be created before the first query:
+
+```bash
+gcloud firestore indexes composite create \
+  --collection-group=chunks \
+  --query-scope=COLLECTION \
+  --field-config=order=ASCENDING,field-path="book_id" \
+  --field-config=field-path="embedding",vector-config='{"dimension":"1536","flat":"{}"}'
+```
 
 ## Alternatives Considered
 
+### Supabase pgvector
+- PostgreSQL with vector extension
+- Permanent free tier, excellent SQL tooling
+- **Rejected:** requires a second platform outside GCP, splitting auth/storage/realtime
+  from vector search across two accounts. The consolidation benefit of staying in Firebase
+  outweighs the marginal SQL ergonomics advantage of pgvector.
+
+### Vertex AI Vector Search
+- Google's dedicated, managed vector database
+- Excellent performance and hybrid search at scale
+- **Rejected:** no meaningful free tier. Minimum cost ~$65/month regardless of usage.
+  Completely unjustifiable for a single-user MVP. Revisit when the project has real
+  scale and revenue.
+
 ### Weaviate Cloud (WCS)
 - Native vector database with excellent hybrid search (BM25 + vector)
-- Better performance than pgvector at scale
-- **Rejected:** free tier expires after 14 days. Paid tier starts at ~$25/month.
-  For a single-user MVP, paying $25/month for a vector database is not justified.
+- **Rejected:** free tier expires after 14 days. Adds a third-party dependency outside GCP.
 
 ### Qdrant Cloud
-- Native vector database, open source, permanent free tier (1GB)
-- Native hybrid search
-- Good Python SDK
-- **Rejected:** adds a separate account and dependency without providing meaningful
-  benefits over pgvector at MVP scale. If Supabase were not already in the stack,
-  Qdrant would be the preferred choice.
+- Open source native vector database, permanent free tier (1GB)
+- **Rejected:** adds a separate account and dependency without meaningful benefit
+  at MVP scale. Good alternative if leaving the GCP ecosystem.
 
 ### Pinecone
 - Industry standard for production vector search
-- Managed, zero operational overhead
-- **Rejected:** free tier is too limited (1 index), high vendor lock-in,
-  and expensive at scale. Overkill for a single-user MVP.
+- **Rejected:** high vendor lock-in, expensive at scale, limited free tier, overkill
+  for single-user MVP.
 
 ## Consequences
 
 ### Positive
-- Single platform for auth, storage, vector search, and realtime status updates
-- Permanent free tier — no cost for MVP
-- SQL-native — straightforward to query, debug, and inspect data
-- Row Level Security built in — user data isolation is handled at the database level
-- No additional account or dependency
+- Single GCP/Firebase project covers auth, storage, realtime updates, and vector search
+- Permanent free tier on Firestore Spark plan
+- Native Firestore Realtime on the same collection used for vector search
+- One account, one IAM, one billing dashboard, one SDK
+- No data leaving the GCP network during retrieval
+- Firebase Security Rules enforce user data isolation at the database level
 
 ### Negative
-- No native hybrid search (BM25 + vector combined). Keyword search would require
-  implementing `tsvector` manually, which adds complexity.
-- Lower performance than native vector databases at scale (>500k vectors per index)
-- pgvector's IVFFlat index requires approximate search tuning (`lists` parameter)
+- No native hybrid search (BM25 + vector combined). Firestore vector search is pure
+  KNN — keyword-boosted retrieval is not available without a separate full-text search
+  solution (e.g., Algolia or Elasticsearch).
+- Requires creating a composite vector index via gcloud CLI before the first query.
+  This is a one-time manual step, but it is not automatic like pgvector's index.
+- Maximum vector dimension is 2048. The chosen model (text-embedding-3-small) produces
+  1536 dimensions — safely within limits.
+- Firestore is a document database, not a relational one. Complex SQL-style joins and
+  aggregations are not possible.
 
 ### Migration path
-The retriever interface (`shared/retriever.py`) is designed to abstract the underlying
-database completely. The function signature:
+
+The retriever interface (`shared/retriever.py`) abstracts the database completely.
+The function signature never changes:
 
 ```python
 async def retrieve(
@@ -80,17 +134,14 @@ async def retrieve(
 ) -> list[ChunkResult]:
 ```
 
-...never changes regardless of which database backs it.
+When hybrid search quality becomes a real need:
 
-When hybrid search quality becomes a real need (multiple users, large libraries,
-queries with proper nouns or technical terms), the migration plan is:
-
-1. Provision a Weaviate Cloud instance
+1. Provision a Weaviate Cloud instance or self-hosted Weaviate on GKE
 2. Write `shared/retriever_weaviate.py` implementing the same interface
-3. Run both retrievers in parallel on a sample of queries — compare result quality
+3. Run both retrievers in parallel — compare result quality on a sample
 4. Switch `shared/retriever.py` to import the Weaviate implementation
-5. Backfill existing chunks into Weaviate (the embeddings are already stored and
-   can be re-used — no need to call the OpenAI API again)
+5. Backfill existing chunks: the embeddings are already stored in Firestore
+   and can be re-used without calling the embedding API again
 
 The chat service, MCP server, ingestion pipeline, and all tests remain unchanged.
-See `notebooks/04_pgvector_vs_weaviate.ipynb` for a side-by-side quality comparison.
+See `notebooks/04_firestore_vs_weaviate.ipynb` for a side-by-side quality comparison.

@@ -3,47 +3,46 @@ shared/retriever.py
 -------------------
 The stable retrieval interface — the heart of the RAG system.
 
-CONCEPT: Why this file is the most important in the project
-Everything else in this system exists to serve this function:
-  - The ingestion pipeline stores chunks so this can find them
-  - The chat service calls this to build the RAG context
-  - The MCP server calls this to respond to tool calls
+CONCEPT: Why this is the most important file in the project
+Every other component exists to serve this one function.
+The ingestion pipeline stores chunks so this can find them.
+The chat service calls this to build the RAG context.
+The MCP server calls this to respond to tool calls.
 
-The function signature is a contract:
+The function signature is a contract that NEVER changes:
 
     retrieve(question_embedding, book_id, top_k) -> list[ChunkResult]
 
-This contract NEVER changes. The implementation can be swapped (pgvector → Weaviate)
-by changing only this file. Nothing else in the system needs to know or care.
+The implementation underneath can be swapped (Firestore → Weaviate) by
+changing only this file. The chat service, MCP server, and all tests
+are completely unaware of this change.
 
-CONCEPT: Vector similarity search
-When the user asks a question, we convert the question to an embedding (a list of
-1536 floats) using the same model that created the chunk embeddings. Then we find
-the chunks whose embeddings are "closest" to the question embedding in vector space.
+CONCEPT: Firestore KNN vector search
+Firestore's find_nearest() performs a K-nearest neighbor (KNN) search
+over the vector field of a collection. It:
+  1. Filters documents by book_id (equality filter — uses the composite index)
+  2. Computes cosine distance between each document's embedding and the query vector
+  3. Returns the top_k documents with smallest distance (highest similarity)
 
-"Closest" is measured by cosine similarity:
-  - Score = 1.0 means the vectors point in the same direction (very similar)
-  - Score = 0.0 means the vectors are perpendicular (unrelated)
-  - Score = -1.0 means the vectors point in opposite directions (opposite meaning)
+This requires a composite vector index created in Phase 1 setup:
+  gcloud firestore indexes composite create \
+    --collection-group=chunks \
+    --field-config=order=ASCENDING,field-path="book_id" \
+    --field-config=field-path="embedding",vector-config='{"dimension":"1536","flat":"{}"}'
 
-In practice, relevant chunks score above 0.7 and irrelevant ones below 0.5.
-The exact threshold depends on the embedding model and the content.
-
-CURRENT IMPLEMENTATION: Supabase pgvector
-Uses a PostgreSQL stored function `match_chunks` (defined in the schema SQL).
-The function takes the query embedding and returns the top-k most similar chunks
-filtered by book_id.
-
-FUTURE IMPLEMENTATION: Weaviate (when hybrid search is needed)
-Replace the body of `retrieve()` with a Weaviate hybrid search query.
-The signature stays the same. See ADR-001 for the migration plan.
+CURRENT IMPLEMENTATION: Firestore vector search (native KNN)
+FUTURE IMPLEMENTATION: Weaviate (when hybrid BM25+vector search is needed)
+  → See ADR-001 migration path and notebooks/04_firestore_vs_weaviate.ipynb
 """
 
 from __future__ import annotations
 
 import logging
 
-from shared.db import supabase
+from google.cloud.firestore_v1.base_vector_query import DistanceMeasure
+from google.cloud.firestore_v1.vector import Vector
+
+from shared.db import CHUNKS_COLLECTION, db
 from shared.models import ChunkResult
 
 logger = logging.getLogger(__name__)
@@ -57,60 +56,74 @@ async def retrieve(
     """
     Finds the most semantically relevant chunks for a given question embedding.
 
-    This is the ONLY function the chat service and MCP server need to call.
-    They do not know how the search works internally — they only know what
-    they receive: a list of ChunkResult objects ordered by relevance.
+    This is the ONLY function the chat service and MCP server call.
+    They receive a list of ChunkResult objects and do not know or care
+    how the search was performed internally.
 
     Args:
-        question_embedding : 1536-dimensional vector from text-embedding-3-small.
-                             Must use the SAME model used during ingestion, or
-                             the similarity scores will be meaningless.
-        book_id            : Filters results to a single book.
-                             Every query is scoped to one book — we never
-                             mix chunks from different books in a single response.
-        top_k              : Number of chunks to return. 5 is a good default.
+        question_embedding : Vector from the embedding model.
+                             MUST use the same model used during ingestion.
+                             Mixing models (e.g., OpenAI at ingest, Vertex AI
+                             at query time) produces meaningless similarity scores.
+        book_id            : Firestore document ID of the book to search within.
+                             Every query is scoped to a single book — chunks from
+                             different books are never mixed in one response.
+        top_k              : Number of chunks to return. Default 5.
                              Too few: LLM lacks context.
-                             Too many: context window fills up, LLM gets confused.
-                             The right value depends on chunk size and question type.
+                             Too many: context window fills, LLM gets confused.
+                             Tune via RETRIEVAL_TOP_K in .env
 
     Returns:
-        List of ChunkResult ordered by relevance score (highest first).
-        Empty list if no chunks are found (book not ingested or wrong book_id).
+        List of ChunkResult ordered by relevance (most similar first).
+        Empty list if the book has no chunks or book_id is wrong.
 
     Raises:
-        Exception: Propagates database errors to the caller for proper handling.
+        Exception: Propagates Firestore errors to the caller.
     """
-    logger.info(
-        "Retrieving chunks",
-        extra={"book_id": book_id, "top_k": top_k},
-    )
+    logger.info("Retrieving chunks", extra={"book_id": book_id, "top_k": top_k})
 
-    # CONCEPT: Why a stored function instead of raw SQL?
-    # Supabase's Python client doesn't support the <=> (cosine distance) operator
-    # directly in the .select() builder. A PostgreSQL stored function lets us
-    # write the vector search query in SQL and call it cleanly from Python.
-    # The function is defined in the schema SQL file (Phase 1 deliverable).
-    response = supabase.rpc(
-        "match_chunks",
-        {
-            "query_embedding": question_embedding,
-            "filter_book_id": book_id,
-            "match_count": top_k,
-        },
-    ).execute()
+    # CONCEPT: Why filter by book_id before the vector search?
+    # Without the book_id filter, find_nearest() would search across ALL chunks
+    # from ALL users and ALL books — both a privacy issue and a quality issue.
+    # The composite index (book_id ASC + embedding KNN) makes this filter fast.
+    collection = db.collection(CHUNKS_COLLECTION)
 
-    if not response.data:
-        logger.warning(
-            "No chunks found",
-            extra={"book_id": book_id},
+    vector_query = collection\
+        .where("book_id", "==", book_id)\
+        .find_nearest(
+            vector_field="embedding",
+            query_vector=Vector(question_embedding),
+            distance_measure=DistanceMeasure.COSINE,
+            limit=top_k,
+            # distance_result_field stores the computed distance in the result
+            # so we can convert it to a similarity score
+            distance_result_field="distance",
         )
-        return []
 
-    # CONCEPT: Why validate with Pydantic here?
-    # The database can return unexpected shapes (null fields, wrong types) if the
-    # schema changes. Pydantic catches this at the boundary — before the bad data
-    # reaches the prompt builder or MCP tool response.
-    results = [ChunkResult(**row) for row in response.data]
+    docs = vector_query.stream()
+    results = []
+
+    async for doc in docs:
+        data = doc.to_dict()
+
+        # CONCEPT: Distance to similarity score conversion
+        # Firestore returns cosine DISTANCE (0 = identical, 2 = opposite).
+        # We convert to cosine SIMILARITY (1 = identical, -1 = opposite)
+        # so that higher scores mean more relevant — consistent with convention.
+        distance = data.pop("distance", 0.0)
+        similarity_score = 1.0 - distance
+
+        results.append(ChunkResult(
+            content=data["content"],
+            book_id=data["book_id"],
+            score=max(0.0, min(1.0, similarity_score)),  # clamp to [0, 1]
+            chunk_index=data["chunk_index"],
+            chapter=data.get("chapter"),
+        ))
+
+    if not results:
+        logger.warning("No chunks found", extra={"book_id": book_id})
+        return []
 
     logger.info(
         "Retrieved chunks",
@@ -121,4 +134,6 @@ async def retrieve(
         },
     )
 
-    return results
+    # Results arrive ordered by distance (ascending) from Firestore.
+    # We return them ordered by similarity (descending) — highest relevance first.
+    return sorted(results, key=lambda r: r.score, reverse=True)
