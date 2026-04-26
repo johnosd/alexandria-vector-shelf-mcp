@@ -1,7 +1,8 @@
 {
   "permissions": {
     "allow": [
-      "Bash(git -C \"c:/Users/johns/Documents/Projetos/alexandria-vector-shelf-mcp\" status)"
+      "Bash(git -C \"c:/Users/johns/Documents/Projetos/alexandria-vector-shelf-mcp\" status)",
+      "Bash(git fetch *)"
     ]
   }
 }

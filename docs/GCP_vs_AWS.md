@@ -105,14 +105,16 @@ the need for a paid vector database service, which is the dominant cost on AWS.
 
 ## Vector search quality comparison
 
-| Dimension | Firestore vector search | OpenSearch k-NN | Aurora pgvector |
-|---|---|---|---|
-| Search type | Pure KNN (cosine, euclidean, dot) | KNN + hybrid (BM25 + vector) | Pure KNN (cosine, L2) |
-| Hybrid search | ❌ Not available | ✅ Native | ❌ Manual with tsvector |
-| Setup complexity | Medium (gcloud index command) | High (cluster config) | Medium (SQL extension) |
-| Cost (MVP) | Free | ~$25-50/month | ~$15/month |
-| Scales to | Millions of docs | Billions of docs | Hundreds of millions |
-| SQL/analytics | ❌ Document model | ❌ Search index model | ✅ Full SQL |
+| Dimension | Firestore vector search | OpenSearch k-NN | Aurora pgvector | Weaviate Cloud |
+|---|---|---|---|---|
+| Search type | Pure KNN (cosine, euclidean, dot) | KNN + hybrid (BM25 + vector) | Pure KNN (cosine, L2) | KNN + hybrid (BM25 + vector) |
+| Hybrid search | ❌ Not available | ✅ Native | ❌ Manual with tsvector | ✅ Native |
+| Setup complexity | Medium (gcloud index command) | High (cluster config) | Medium (SQL extension) | Low (managed cloud) |
+| Cost (MVP) | Free | ~$25-50/month | ~$15/month | Free 14 days, then ~$25/month |
+| Scales to | Millions of docs | Billions of docs | Hundreds of millions | Billions of docs |
+| SQL/analytics | ❌ Document model | ❌ Search index model | ✅ Full SQL | ❌ GraphQL only |
+| Platform | GCP native | AWS native | AWS native | Cloud-agnostic |
+| Migration path | Change retriever.py only | Change retriever.py only | Change retriever.py only | Change retriever.py only |
 
 **When to use OpenSearch (AWS):** If hybrid search is required from day one and the project
 is already on AWS. The BM25 + vector combination significantly improves retrieval quality
