@@ -48,24 +48,46 @@ class BookStatus(str, Enum):
 
 class BookCreate(BaseModel):
     """
-    Payload for creating a new book document in Firestore.
-    The book document must exist before ingestion starts — the ingestion
-    service needs the book_id to associate chunks.
+    Internal payload used by the Library Manager to create a new catalog entry.
+
+    Only created after the ADR-006 Tier 0-3 deduplication checks (file hash,
+    ISBN, content hash, fuzzy title/author) find no existing match. Books are
+    a global catalog, not owned by a single user — see BookRecord.
     """
 
-    user_id: str                # Firebase Auth UID
-    title: str | None = None    # extracted from epub metadata
-    author: str | None = None   # extracted from epub metadata
-    epub_path: str | None = None  # gs://bucket/path in Firebase Storage
+    isbn: str | None = None                # normalized ISBN-13, checksum-validated
+    title: str | None = None               # extracted from epub metadata
+    author: str | None = None              # extracted from epub metadata
+    language: str | None = None            # ISO 639-1, from epub dc:language
+    normalized_title: str                  # fuzzy-match key (ADR-006 Tier 3)
+    normalized_author: str                 # fuzzy-match key (ADR-006 Tier 3)
+    file_hash: str                         # sha256 of raw .epub bytes (Tier 0 key)
+    epub_path: str | None = None           # gs://bucket/path in Firebase Storage
+    possibly_duplicate_of: str | None = None  # Tier 3 candidate, flagged not merged
 
 
 class BookRecord(BaseModel):
-    """Full book document as returned by the API."""
+    """
+    Full book document as returned by the API.
+
+    CONCEPT: Global catalog, not per-user (ADR-006)
+    A book is not owned by a single user — if two users upload the same book,
+    they share one BookRecord and one set of chunks. Per-user access is tracked
+    separately in `user_library` (see LibraryEntry). This is what makes
+    deduplication actually save embedding cost and storage across users, not
+    just prevent the same user from re-uploading their own book.
+    """
 
     id: str
-    user_id: str
+    isbn: str | None = None
     title: str | None = None
     author: str | None = None
+    language: str | None = None
+    normalized_title: str
+    normalized_author: str
+    file_hash: str
+    content_hash: str | None = None        # set once parsing completes (Tier 2 key)
+    possibly_duplicate_of: str | None = None
     epub_path: str | None = None
     status: BookStatus = BookStatus.PENDING
     chunk_count: int = 0
@@ -75,6 +97,20 @@ class BookRecord(BaseModel):
 
     class Config:
         from_attributes = True
+
+
+class LibraryEntry(BaseModel):
+    """
+    A user's "shelf" record — stored at user_library/{user_id}/books/{book_id}.
+
+    Tracks that a user has a catalog book in their library. Contains no book
+    content; the content lives once in BookRecord/ChunkResult regardless of how
+    many users' shelves reference it.
+    """
+
+    user_id: str
+    book_id: str
+    added_at: datetime | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -87,10 +123,11 @@ class ChunkCreate(BaseModel):
     Schema for a single chunk ready to be stored in Firestore.
     Created by chunker.py, populated with embedding by embedder.py,
     then passed to store.py.
+
+    No user_id: chunks belong to the catalog book, not a user (ADR-006).
     """
 
     book_id: str
-    user_id: str
     content: str
     embedding: list[float]          # output of embedding model (1536 or 768 floats)
     chunk_index: int                # 0-based position in the book
@@ -124,26 +161,48 @@ class ChunkResult(BaseModel):
 
 
 # ---------------------------------------------------------------------------
-# Ingestion schemas
+# Library / ingestion schemas
 # ---------------------------------------------------------------------------
+
+
+class LibraryUploadRequest(BaseModel):
+    """
+    Request body for POST /library/books — the public entry point (ADR-006).
+
+    Replaces the old assumption that the client pre-creates a book_id. The
+    Library Manager decides the book_id: it runs the Tier 0-3 dedup checks
+    and either attaches the user to an existing catalog book or creates a
+    new one and starts the ingestion pipeline.
+    """
+
+    epub_path: str      # path in Firebase Storage (gs://bucket/path), already uploaded
+    user_id: str        # Firebase Auth UID
+
+
+class LibraryUploadResponse(BaseModel):
+    """Response body for POST /library/books."""
+
+    book_id: str
+    status: BookStatus
+    deduplicated: bool = False   # True if matched an existing book (Tier 0/1/2) — no reprocessing
+    message: str = "Monitor status via Firestore Realtime on the book document."
 
 
 class IngestRequest(BaseModel):
     """
-    Request body for POST /ingest.
+    Internal handoff from the Library Manager to the parse/chunk/embed pipeline,
+    once a book_id has been assigned (new book, no dedup match found).
 
-    The ingestion service receives this, returns 202 Accepted immediately,
-    then processes the epub asynchronously. The client polls for status
-    via Firestore Realtime subscription on the book document.
+    Not a public endpoint — POST /library/books is the public entry point.
+    No user_id: ingestion produces catalog content, not user-scoped content.
     """
 
-    epub_url: str       # signed Firebase Storage URL to download the epub
-    book_id: str        # pre-created Firestore book document ID
-    user_id: str        # Firebase Auth UID
+    epub_path: str      # path in Firebase Storage (gs://bucket/path)
+    book_id: str        # Firestore book document ID, assigned by the Library Manager
 
 
 class IngestResponse(BaseModel):
-    """Response body for POST /ingest — always 202 Accepted."""
+    """Response body for the internal ingestion handoff — always 202 Accepted."""
 
     job_id: str
     book_id: str

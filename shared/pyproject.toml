@@ -1,0 +1,14 @@
+[project]
+name = "shared"
+version = "0.1.0"
+description = "Schemas, Firestore client, and the stable retriever interface — imported by ingestion, chat, and mcp."
+requires-python = ">=3.11"
+dependencies = [
+    "pydantic>=2.7",
+    "firebase-admin>=6.5",
+    "google-cloud-firestore>=2.16",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"

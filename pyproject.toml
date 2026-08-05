@@ -1,3 +1,13 @@
+[project]
+name = "alexandria-vector-shelf-mcp"
+version = "0.1.0"
+requires-python = ">=3.11"
+
+[tool.uv.workspace]
+# ingestion, chat, and mcp are added here once each has its own
+# pyproject.toml (ADR-008) — an empty directory breaks `uv sync`.
+members = ["shared"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 markers = [

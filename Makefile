@@ -22,7 +22,7 @@ help:
 	@echo "  make clean            Remove __pycache__ and temp files"
 	@echo ""
 	@echo "Usage examples:"
-	@echo "  make ingest EPUB_URL=https://... BOOK_ID=abc123 USER_ID=uid456"
+	@echo "  make ingest EPUB_PATH=gs://bucket/path.epub USER_ID=uid456"
 	@echo "  make chat BOOK_ID=abc123 USER_ID=uid456 QUESTION='What is this about?'"
 	@echo ""
 
@@ -33,8 +33,7 @@ help:
 setup:
 	@echo "Setting up local environment..."
 	cp -n .env.example .env || echo ".env already exists, skipping"
-	pip install -r ingestion/requirements.txt
-	pip install -r chat/requirements.txt
+	uv sync
 	@echo ""
 	@echo "Done. Next steps:"
 	@echo "  1. Fill in .env with your Firebase and API credentials"
@@ -75,35 +74,34 @@ index:
 # ---------------------------------------------------------------------------
 
 test:
-	pytest tests/ -v --tb=short
+	uv run pytest tests/ -v --tb=short
 
 test-unit:
-	pytest tests/ -v --tb=short -m "unit"
+	uv run pytest tests/ -v --tb=short -m "unit"
 
 test-integration:
-	pytest tests/ -v --tb=short -m "integration"
+	uv run pytest tests/ -v --tb=short -m "integration"
 
 # ---------------------------------------------------------------------------
 # Code quality
 # ---------------------------------------------------------------------------
 
 lint:
-	ruff check ingestion/ chat/ shared/ mcp/ tests/
+	uv run ruff check ingestion/ chat/ shared/ mcp/ tests/
 
 format:
-	ruff format ingestion/ chat/ shared/ mcp/ tests/
+	uv run ruff format ingestion/ chat/ shared/ mcp/ tests/
 
 # ---------------------------------------------------------------------------
 # Manual pipeline testing via curl
 # ---------------------------------------------------------------------------
 
 ingest:
-	@test -n "$(EPUB_URL)"  || (echo "Error: EPUB_URL required.  Usage: make ingest EPUB_URL=... BOOK_ID=... USER_ID=..." && exit 1)
-	@test -n "$(BOOK_ID)"   || (echo "Error: BOOK_ID required." && exit 1)
+	@test -n "$(EPUB_PATH)" || (echo "Error: EPUB_PATH required.  Usage: make ingest EPUB_PATH=gs://bucket/path.epub USER_ID=uid456" && exit 1)
 	@test -n "$(USER_ID)"   || (echo "Error: USER_ID required." && exit 1)
-	curl -s -X POST http://localhost:8001/ingest \
+	curl -s -X POST http://localhost:8001/library/books \
 		-H "Content-Type: application/json" \
-		-d '{"epub_url":"$(EPUB_URL)","book_id":"$(BOOK_ID)","user_id":"$(USER_ID)"}' \
+		-d '{"epub_path":"$(EPUB_PATH)","user_id":"$(USER_ID)"}' \
 		| python3 -m json.tool
 
 chat:

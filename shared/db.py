@@ -97,8 +97,11 @@ db: AsyncClient = firestore.AsyncClient(
 storage_bucket = storage.bucket()
 
 # Collection name constants — change via environment variables if needed
+# `books` and `chunks` are a global catalog, not user-scoped (ADR-006).
+# `user_library` is the per-user subcollection tracking shelf membership.
 BOOKS_COLLECTION = os.environ.get("FIRESTORE_BOOKS_COLLECTION", "books")
 CHUNKS_COLLECTION = os.environ.get("FIRESTORE_CHUNKS_COLLECTION", "chunks")
+USER_LIBRARY_COLLECTION = os.environ.get("FIRESTORE_USER_LIBRARY_COLLECTION", "user_library")
 
 
 # ---------------------------------------------------------------------------

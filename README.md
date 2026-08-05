@@ -61,17 +61,20 @@ No rewriting, no duplication.
         │  Firebase / Google Cloud        │
         │                                 │
         │  Firestore  (chunks + vectors)  │  ← vector search native
+        │  Firestore  (books catalog +    │  ← global, shared across users
+        │              user_library)      │  ← per-user shelf (ADR-006)
         │  Firebase Storage  (.epub)      │
         │  Firebase Auth  (user_id)       │
         │  Firestore Realtime  (status)   │
         └─────────────────────────────────┘
                       ▲
-                      │ parse → chunk → embed → store
+                      │ dedup → parse → chunk → embed → store
                       │
         ┌─────────────────────────────────┐
         │  Ingestion Service              │
         │  Google Cloud Run               │
         │                                 │
+        │  library_manager.py             │  ← dedup gate, ADR-006
         │  parser.py                      │
         │  chunker.py                     │
         │  embedder.py                    │
@@ -110,19 +113,21 @@ learning RAG engineering.
 alexandria-vector-shelf-mcp/
 │
 ├── ingestion/                  # Microservice 1 — Google Cloud Run (serverless)
-│   ├── main.py                 # FastAPI entrypoint — POST /ingest
+│   ├── main.py                 # FastAPI entrypoint — POST /library/books
+│   ├── library_manager.py      # dedup gate: file hash → ISBN → content hash → fuzzy match (ADR-006)
+│   │                           # + Pydantic AI metadata fallback when OPF is unusable (ADR-009)
 │   ├── parser.py               # epub → clean text (EbookLib + BeautifulSoup4)
 │   ├── chunker.py              # text → overlapping chunks
-│   ├── embedder.py             # chunks → Vertex AI / OpenAI embeddings
+│   ├── embedder.py             # chunks → Vertex AI / OpenAI embeddings (LangChain, ADR-007)
 │   ├── store.py                # embeddings → Firestore vector collection
-│   ├── requirements.txt
+│   ├── pyproject.toml          # uv workspace member, depends on shared (ADR-008)
 │   └── Dockerfile
 │
 ├── chat/                       # Microservice 2 — Google Cloud Run (always-on)
 │   ├── main.py                 # FastAPI entrypoint — GET /chat (SSE)
 │   ├── prompt.py               # chunks + question → RAG prompt
-│   ├── streamer.py             # prompt → Gemini Flash → SSE stream
-│   ├── requirements.txt
+│   ├── streamer.py             # prompt → Gemini Flash → SSE stream (LangChain, ADR-007)
+│   ├── pyproject.toml          # uv workspace member, depends on shared (ADR-008)
 │   └── Dockerfile
 │
 ├── mcp/                        # Phase 5 — MCP Server
@@ -130,11 +135,12 @@ alexandria-vector-shelf-mcp/
 │   ├── tools.py                # wraps shared/retriever.py as MCP tools
 │   ├── resources.py            # exposes book library as MCP resources
 │   ├── prompts.py              # reusable MCP prompt templates
-│   ├── requirements.txt
+│   ├── pyproject.toml          # uv workspace member, depends on shared (ADR-008)
 │   └── Dockerfile
 │
 ├── shared/                     # Shared logic — imported by all services
 │   ├── __init__.py
+│   ├── pyproject.toml          # real uv workspace package (ADR-008)
 │   ├── db.py                   # Firestore client (singleton)
 │   ├── models.py               # Pydantic schemas (ChunkResult, Book, etc.)
 │   └── retriever.py            # THE stable interface — never changes signature
@@ -148,6 +154,8 @@ alexandria-vector-shelf-mcp/
 │
 ├── docs/
 │   ├── schema.md               # Firestore collection design
+│   ├── DEVELOPMENT.md          # recommended MCP servers for AI-assisted dev on this repo
+│   ├── BIBLIOGRAPHY.md         # learning resources + technical reference, by phase/ADR
 │   ├── ARCHITECTURE.md         # Deep dive into design decisions
 │   ├── comparisons/
 │   │   └── GCP_vs_AWS.md       # Full stack comparison GCP vs AWS
@@ -156,7 +164,11 @@ alexandria-vector-shelf-mcp/
 │       ├── ADR-002-stack-selection.md
 │       ├── ADR-003-chunk-strategy.md
 │       ├── ADR-004-prompt-design.md
-│       └── ADR-005-mcp-integration.md
+│       ├── ADR-005-mcp-integration.md
+│       ├── ADR-006-library-deduplication.md
+│       ├── ADR-007-scoped-langchain-adoption.md
+│       ├── ADR-008-uv-dependency-management.md
+│       └── ADR-009-pydantic-ai-structured-outputs.md
 │
 ├── tests/
 │   ├── test_parser.py
@@ -168,7 +180,8 @@ alexandria-vector-shelf-mcp/
 ├── .env.example
 ├── docker-compose.yml
 ├── Makefile
-├── pyproject.toml
+├── pyproject.toml              # uv workspace root (ADR-008)
+├── uv.lock                     # single lockfile for the whole workspace
 ├── .gitignore
 ├── PHASE_1_SETUP.md
 └── README.md                   ← you are here
@@ -192,11 +205,22 @@ alexandria-vector-shelf-mcp/
 | Realtime status | Firestore Realtime | live processing status, built into Firestore |
 | MCP protocol | Anthropic MCP Python SDK | official SDK, Claude Desktop compatible |
 | Epub parsing | EbookLib + BeautifulSoup4 | mature, handles malformed epubs |
+| Library dedup | rapidfuzz | fuzzy title/author matching for catalog dedup (ADR-006) — small, not a framework |
+| Embeddings client | LangChain (`Embeddings` interface) | provider-agnostic Vertex AI ↔ OpenAI swap, batching/retry built in — scoped to `embedder.py` (ADR-007) |
+| Chat LLM client | LangChain (`BaseChatModel` interface) | provider-agnostic streaming call to Gemini Flash — scoped to `chat/streamer.py` (ADR-007) |
+| Dependency management | uv workspaces | one lockfile across ingestion/chat/mcp/shared — no cross-service version drift (ADR-008) |
+| Structured LLM output | Pydantic AI | typed, validated output for the RAG eval judge and the metadata-extraction fallback — not chat/embedding (ADR-009) |
+| MCP server framework | FastMCP | official SDK's built-in `FastMCP` for local stdio mode; standalone `fastmcp` package as the candidate if remote mode is ever built (ADR-005) |
 | Containerization | Docker | consistent environments |
 
 ---
 
 ## Firestore collection design
+
+`books` and `chunks` form a **global catalog** shared by all users — a book
+uploaded by one user is not reprocessed if another user uploads the same one.
+Per-user ownership lives separately in `user_library`. See ADR-006 and
+`docs/schema.md` for the full deduplication design.
 
 ```
 firestore/
@@ -205,22 +229,30 @@ firestore/
 │   ├── displayName: string
 │   └── createdAt: timestamp
 │
-├── books/{book_id}
-│   ├── user_id: string
-│   ├── title: string
-│   ├── author: string
-│   ├── epub_path: string          ← path in Firebase Storage
-│   ├── status: string             ← pending | processing | ready | error
+├── books/{book_id}                    ← global catalog, not user-owned
+│   ├── isbn: string | null            ← normalized ISBN-13, checksum-validated
+│   ├── title: string | null
+│   ├── author: string | null
+│   ├── language: string | null        ← ISO 639-1, from epub dc:language
+│   ├── normalized_title: string       ← fuzzy-match key
+│   ├── normalized_author: string      ← fuzzy-match key
+│   ├── file_hash: string              ← sha256 of raw .epub bytes
+│   ├── content_hash: string | null    ← sha256 of extracted normalized text
+│   ├── possibly_duplicate_of: string | null  ← fuzzy candidate, flagged not merged
+│   ├── epub_path: string              ← path in Firebase Storage
+│   ├── status: string                 ← pending | processing | ready | error
 │   ├── chunk_count: number
 │   ├── error_message: string | null
 │   ├── created_at: timestamp
 │   └── updated_at: timestamp
 │
-└── chunks/{chunk_id}
+├── user_library/{user_id}/books/{book_id}   ← the "shelf", per user
+│   └── added_at: timestamp
+│
+└── chunks/{chunk_id}                  ← global catalog, not user-owned
     ├── book_id: string
-    ├── user_id: string
     ├── content: string
-    ├── embedding: Vector(1536)    ← Firestore native vector type
+    ├── embedding: Vector(1536)        ← Firestore native vector type
     ├── chunk_index: number
     ├── chapter: string | null
     └── created_at: timestamp
@@ -239,17 +271,21 @@ gcloud firestore indexes composite create \
 
 ## API contracts
 
-### Ingestion Service — `POST /ingest`
+### Ingestion Service — `POST /library/books`
+
+The public entry point (ADR-006). The client no longer pre-creates a `book_id` —
+the Library Manager decides it, after running the Tier 0-3 deduplication checks
+(file hash, ISBN, content hash, fuzzy title/author) against the global catalog.
 
 ```
 Request body (JSON)
-  epub_url  string   Signed URL of the epub in Firebase Storage
-  book_id   string   UUID of the pre-created book document
-  user_id   string   Firebase Auth UID
+  epub_path  string   Path of the epub already uploaded to Firebase Storage
+  user_id    string   Firebase Auth UID
 
 Response 202 Accepted
-  job_id    string   Internal processing identifier
-  status    string   "processing"
+  book_id        string   Catalog book ID (existing or newly created)
+  status         string   "processing" | "ready"
+  deduplicated   bool     true if matched an existing book — no reprocessing triggered
 
 Status updates delivered via Firestore Realtime on books/{book_id}.status
 ```
@@ -294,16 +330,17 @@ repository structure, first two ADRs.
 repo structure, README, ADR-001, ADR-002, `.env.example`, `PHASE_1_SETUP.md`
 
 ### Phase 2 — Ingestion Service `week 2–3`
-Complete epub processing pipeline deployed to Cloud Run.
+Complete epub processing pipeline deployed to Cloud Run, including the
+Library Manager dedup gate in front of it.
 
 **Deliverables:** Cloud Run deployed, pipeline testable via `curl`,
-`notebooks/02_chunking_strategies.ipynb`, ADR-003
+`notebooks/02_chunking_strategies.ipynb`, ADR-003, ADR-006
 
 ### Phase 3 — Chat Service `week 4`
 Retrieval and streaming chat API with stable retriever interface.
 
 **Deliverables:** Cloud Run always-on deployed, SSE streaming end-to-end,
-retriever interface abstracted for future migration, ADR-004
+retriever interface abstracted for future migration, ADR-004, ADR-007
 
 ### Phase 4 — Hardening + Docs `week 5`
 Integration tests, RAG evaluation, full documentation.
@@ -323,9 +360,10 @@ MCP SDK wrapper exposing retrieval as tools for any LLM agent.
 
 ```bash
 cp .env.example .env        # fill in your Firebase and Google Cloud credentials
+uv sync                     # install the whole workspace into one .venv (ADR-008)
 docker-compose up           # start all services locally
 make test                   # run all tests
-make ingest EPUB_URL=...    # test ingestion pipeline via curl
+make ingest EPUB_PATH=...   # test the /library/books pipeline via curl (ADR-006)
 ```
 
 ---

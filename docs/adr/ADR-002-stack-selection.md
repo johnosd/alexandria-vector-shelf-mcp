@@ -104,8 +104,9 @@ beyond Application Default Credentials.
 - Gemini Ultra: overkill and expensive for a chat-with-book use case
 - Gemini Nano: not available via API
 
-### RAG Framework: None (direct API calls)
-LangChain and LlamaIndex were evaluated and rejected.
+### RAG Framework: None (direct API calls), for chunking, retrieval, and prompting
+LangChain and LlamaIndex were evaluated and rejected for the pipeline's
+control-critical modules.
 
 Reasons:
 - The RAG pipeline is 4 sequential steps — no orchestration framework needed
@@ -113,6 +114,14 @@ Reasons:
 - Frameworks add abstraction layers that make debugging harder for someone learning RAG
 - LangChain has broken API compatibility multiple times between versions
 - The `retriever.py` interface pattern achieves the same decoupling without a framework
+
+**Update (ADR-007):** this decision is partially superseded for `embedder.py`
+and `chat/streamer.py` specifically — two leaf modules whose whole job is
+talking to an external provider, where LangChain's `Embeddings`/`BaseChatModel`
+interfaces deliver the provider-agnostic goal this ADR already stated
+("switching is a one-line config change") without hand-rolling it. Chunking,
+retrieval, and prompt construction remain framework-free — see ADR-007 for the
+scope boundary and reasoning.
 
 ### Epub Processing: EbookLib + BeautifulSoup4
 EbookLib is the standard Python library for epub. BeautifulSoup4 strips HTML from

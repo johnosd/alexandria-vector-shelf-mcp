@@ -88,6 +88,41 @@
 
 ---
 
+## Technical Reference — Consult During Implementation
+
+Unlike the phase sections above (conceptual learning, consumed once), this is
+day-to-day API/library reference — mapped to the module or ADR it supports, to
+consult while writing that specific piece of code.
+
+| Type | Resource | Supports | Link |
+|------|----------|----------|------|
+| 📄 Docs | Firestore vector search | `shared/retriever.py`, ADR-001 | [docs.cloud.google.com](https://docs.cloud.google.com/firestore/native/docs/vector-search) |
+| 📄 Docs | Vertex AI Text Embeddings API | `ingestion/embedder.py`, ADR-002/007 | [cloud.google.com](https://cloud.google.com/vertex-ai/generative-ai/docs/model-reference/text-embeddings-api) |
+| 📄 Docs | Gemini API — streaming `generateContent` | `chat/streamer.py`, ADR-004/007 | [ai.google.dev](https://ai.google.dev/api/generate-content) |
+| 📄 Docs | Firebase Admin Python SDK | `shared/db.py` | [firebase.google.com](https://firebase.google.com/docs/admin/setup) |
+| 📄 Docs | FastAPI | `ingestion/main.py`, `chat/main.py` | [fastapi.tiangolo.com](https://fastapi.tiangolo.com/) |
+| 📄 Docs | Cloud Run — deploy Python (FastAPI) | Deploy of both services, ADR-002 | [docs.cloud.google.com](https://docs.cloud.google.com/run/docs/quickstarts/build-and-deploy/deploy-python-fastapi-service) |
+| 📄 Docs | EbookLib | `ingestion/parser.py`, ADR-003/006 | [docs.sourcefabric.org](https://docs.sourcefabric.org/projects/ebooklib/en/latest/) |
+| 📄 Docs | rapidfuzz | ADR-006 Tier 3 fuzzy matching | [rapidfuzz.github.io](https://rapidfuzz.github.io/RapidFuzz/) |
+| 📄 Docs | Pydantic AI | ADR-009 | [pydantic.dev](https://pydantic.dev/docs/ai/overview/) |
+| 📄 Docs | uv — workspaces | ADR-008 | [docs.astral.sh](https://docs.astral.sh/uv/concepts/projects/workspaces/) |
+| 📄 Docs | MCP Python SDK | ADR-005 | [py.sdk.modelcontextprotocol.io](https://py.sdk.modelcontextprotocol.io/) |
+| 📄 Docs | FastMCP | ADR-005 | [gofastmcp.com](https://gofastmcp.com/getting-started/welcome) |
+| 📄 Docs | LangChain — Google integrations (`langchain-google-vertexai`, `langchain-google-genai`) | ADR-007 | [docs.langchain.com](https://docs.langchain.com/oss/python/integrations/providers/google) |
+
+### Notes
+
+- `langchain-google-genai` 4.0.0+ lets `ChatGoogleGenerativeAI` target either
+  the Gemini Developer API or the Vertex AI backend from the same class —
+  worth checking when `chat/streamer.py` is actually implemented, since it may
+  simplify the provider-swap story in ADR-007 further (a config change instead
+  of a class change).
+- See `docs/DEVELOPMENT.md` for the recommended MCP server setup — Firebase
+  MCP and Context7 in particular reduce how often this table needs consulting
+  by hand (live data inspection and live version-pinned docs, respectively).
+
+---
+
 ## Changelog
 
 | Date | Change |
@@ -97,3 +132,4 @@
 | Apr 2026 | Replaced *Building LLMs for Production* (Bouchard, 2024) with *AI Engineering* (Chip Huyen, O'Reilly, 2025) |
 | Apr 2026 | Added links to all resources |
 | Apr 2026 | Added rationale notes per phase explaining why each resource was chosen or updated |
+| Aug 2026 | Added Technical Reference section — implementation-time docs mapped to modules/ADRs (ADR-001 through ADR-009) |

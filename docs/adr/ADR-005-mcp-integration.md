@@ -101,6 +101,55 @@ library://books/{book_id}/chapters  → list of chapters in a book
 - NeoReader app — can adopt MCP protocol instead of direct HTTP
 - Any custom LLM agent built with the MCP Python SDK
 
+### Deployment topology: local stdio vs remote Cloud Run
+
+The MCP server is not automatically "a fourth Cloud Run service." Chat and MCP
+look similar because both call `retrieve()`, but they differ in every
+operational dimension that actually determines deployment shape: protocol,
+trust model, and — critically here — where the process runs.
+
+The primary targets (Claude Desktop, Cursor) launch MCP servers as a **local
+stdio subprocess** on the user's own machine, spawned on demand by the client
+itself. This is the default mode for Phase 5:
+
+- `mcp/server.py` runs locally, imports `shared/retriever.py` directly, and
+  connects to Firestore using the same Application Default Credentials pattern
+  as the other services (`shared/db.py`)
+- **No Cloud Run deployment, no `min-instances`, no additional hosting cost** —
+  the "deployable unit" is a process the desktop client starts and stops, not
+  a service Alexandria operates
+- This is why Option C (trust the calling agent) in the Authentication section
+  below is sufficient for MVP: the process is running as the user, on the
+  user's machine
+
+A **remote mode** — an MCP server reachable over HTTP+SSE, e.g. if NeoReader
+itself adopts MCP instead of direct REST — is deferred, not assumed. If and
+when it's needed, it becomes a Cloud Run service with `min-instances=0`: a
+tool call from an agent tolerates cold start far better than a human waiting
+on a chat response, so it does not need to inherit the chat service's
+always-on cost (ADR-002). It also would not merge with the chat service even
+then — the response contract (structured `ChunkResult[]` vs. streamed prose)
+and the auth model (agent-trust vs. end-user Firebase Auth) stay different
+enough that combining them would mean branching logic behind one endpoint
+serving two incompatible contracts.
+
+### Implementation library: FastMCP
+
+The `@mcp.tool()` / `@mcp.resource()` decorator style already used in the code
+sketches above is the FastMCP pattern — this ADR names it explicitly rather
+than leaving it implicit:
+
+- **Local mode** (default, per the topology above): use `FastMCP` built into
+  the official SDK (`mcp.server.fastmcp`). It's the same official, Claude
+  Desktop-compatible SDK ADR-002/README already committed to — no extra
+  dependency beyond `mcp` itself.
+- **Remote mode** (deferred, only if a Cloud Run-hosted MCP server becomes
+  necessary): reconsider the standalone `fastmcp` package instead. It carries
+  more mature auth/OAuth scaffolding than the bare official SDK, which
+  directly addresses Option B in the Authentication section below (OAuth 2.0
+  with a Firebase Auth token) — exactly the unresolved piece remote mode would
+  need. Not adopted now because remote mode itself isn't built yet.
+
 ## Consequences
 
 ### Positive
@@ -108,10 +157,14 @@ library://books/{book_id}/chapters  → list of chapters in a book
 - Any MCP-compatible agent can query the user's entire book library as context
 - Demonstrates Phase 5 agentic AI engineering on the portfolio
 - Zero rewriting — the MCP wrapper sits cleanly on top of existing infrastructure
+- Local stdio mode adds zero cloud hosting cost — no min-instances, no idle Cloud Run bill
 
 ### Negative
 - MCP is still a relatively new protocol — tooling and client support are maturing
-- Adds a fourth deployable unit (mcp/) to the repository
+- If remote mode is ever needed, it becomes a fifth deployable unit (four cloud
+  services: ingestion, chat, remote MCP, plus the `mcp/` local-mode entrypoint
+  that ships as part of the repo but isn't hosted) — deferred until there's an
+  actual remote client to justify it
 - Auth model for MCP server needs careful design — the server must verify that the
   calling agent is authorized to access a specific user's books
 

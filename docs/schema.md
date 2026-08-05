@@ -3,8 +3,12 @@
 ## Overview
 
 alexandria-vector-shelf-mcp uses Cloud Firestore as the single database for all data:
-user books, chunk text, vector embeddings, and processing status. Firestore's native
-vector search capability (KNN) replaces a separate vector database.
+the book catalog, chunk text, vector embeddings, and processing status. Firestore's
+native vector search capability (KNN) replaces a separate vector database.
+
+`books` and `chunks` form a global catalog shared by all users; `user_library`
+tracks per-user ownership separately. See ADR-006 for why and how deduplication
+works across users.
 
 ---
 
@@ -25,27 +29,50 @@ users/
 
 ### `books/{book_id}`
 
-Tracks every epub uploaded by a user. The NeoReader app subscribes to this document
-via Firestore Realtime to receive live processing status updates.
+A **global catalog entry** — shared across all users, not owned by any single one.
+See ADR-006. If two users upload the same book, they share one `books` document
+and one set of `chunks`; only their `user_library` entry differs.
 
 ```
 books/
   {book_id}/
-    user_id:        string          ← Firebase Auth UID
-    title:          string | null   ← extracted from epub metadata
-    author:         string | null   ← extracted from epub metadata
-    epub_path:      string          ← path in Firebase Storage (gs://bucket/path)
-    status:         string          ← "pending" | "processing" | "ready" | "error"
-    chunk_count:    number          ← populated when status = "ready"
-    error_message:  string | null   ← populated when status = "error"
-    created_at:     timestamp
-    updated_at:     timestamp
+    isbn:                   string | null   ← normalized ISBN-13, checksum-validated
+    title:                  string | null   ← extracted from epub metadata
+    author:                 string | null   ← extracted from epub metadata
+    language:               string | null   ← ISO 639-1, from epub dc:language
+    normalized_title:       string          ← lowercase, no accents/punctuation — fuzzy match key
+    normalized_author:      string          ← same normalization, for fuzzy match
+    file_hash:              string          ← sha256 of the raw .epub bytes (Tier 0 dedup key)
+    content_hash:           string | null   ← sha256 of extracted normalized text (Tier 2 dedup key)
+    possibly_duplicate_of:  string | null   ← Tier 3 fuzzy-match candidate book_id, flagged not merged
+    epub_path:              string          ← path in Firebase Storage (gs://bucket/path)
+    status:                 string          ← "pending" | "processing" | "ready" | "error"
+    chunk_count:             number          ← populated when status = "ready"
+    error_message:           string | null   ← populated when status = "error"
+    created_at:              timestamp
+    updated_at:              timestamp
 ```
 
 **Status lifecycle:**
 ```
 pending → processing → ready
                     ↘ error
+```
+
+### `user_library/{user_id}/books/{book_id}`
+
+The per-user "shelf" — tracks which catalog books a user has access to. This is
+the only user-scoped piece of library data; the book content itself
+(`books`, `chunks`) is shared. The NeoReader app subscribes to the referenced
+`books/{book_id}` document via Firestore Realtime to receive live processing
+status updates.
+
+```
+user_library/
+  {user_id}/
+    books/
+      {book_id}/
+        added_at:  timestamp
 ```
 
 **Realtime subscription (NeoReader app):**
@@ -61,14 +88,14 @@ db.collection("books").doc(bookId)
 
 ### `chunks/{chunk_id}`
 
-Stores every text segment of every book with its vector embedding. This is the
-largest collection — a typical 300-page book produces ~500–800 chunks.
+Stores every text segment of every catalog book with its vector embedding. Shared
+across all users who have the book on their shelf — not duplicated per user. This
+is the largest collection — a typical 300-page book produces ~500–800 chunks.
 
 ```
 chunks/
   {chunk_id}/
     book_id:       string          ← reference to books/{book_id}
-    user_id:       string          ← denormalized for faster security filtering
     content:       string          ← raw text of this chunk
     embedding:     Vector(1536)    ← Firestore native vector type
     chunk_index:   number          ← 0-based position in the original book
@@ -76,10 +103,11 @@ chunks/
     created_at:    timestamp
 ```
 
-**Why `user_id` is denormalized on chunks:**
-Firestore Security Rules cannot do cross-collection lookups efficiently. Storing
-`user_id` directly on each chunk allows a simple, fast rule:
-`allow read: if request.auth.uid == resource.data.user_id`
+**Why there's no `user_id` on chunks:**
+Chunks belong to the catalog book, not to a user — that's the point of the
+global catalog (ADR-006). Access control is enforced via a Firestore Security
+Rules `exists()` lookup against the requesting user's `user_library` entry
+instead of a denormalized field (see Security Rules below).
 
 ---
 
@@ -107,8 +135,10 @@ If you change models, you must delete the index and recreate it with the new dim
 ### Standard indexes (auto-created by Firestore for simple queries)
 
 Firestore auto-creates single-field indexes. Composite indexes for queries like
-`WHERE user_id == X ORDER BY created_at DESC` must be created manually or will be
-suggested by Firestore in error messages during development.
+`WHERE isbn == X` or `WHERE normalized_title == X AND normalized_author == X` on
+`books` (used by the Library Manager's Tier 1/3 dedup checks, ADR-006) must be
+created manually or will be suggested by Firestore in error messages during
+development.
 
 ---
 
@@ -125,22 +155,28 @@ service cloud.firestore {
                          && request.auth.uid == userId;
     }
 
-    // Books: users can CRUD their own books only
+    // Books: global catalog, not user-owned (ADR-006).
+    // Metadata isn't sensitive — any authenticated user can read it, which is
+    // needed to discover "this book already exists" before uploading.
+    // All writes go through the Library Manager via the Admin SDK.
     match /books/{bookId} {
-      allow read, write: if request.auth != null
-                         && request.auth.uid == resource.data.user_id;
-
-      allow create: if request.auth != null
-                    && request.auth.uid == request.resource.data.user_id;
+      allow read: if request.auth != null;
+      allow write: if false;
     }
 
-    // Chunks: users can only read their own chunks
-    // Write is restricted to server-side (Admin SDK bypasses rules)
-    match /chunks/{chunkId} {
-      allow read: if request.auth != null
-                  && request.auth.uid == resource.data.user_id;
+    // User library: the per-user "shelf" — which catalog books this user has.
+    match /user_library/{userId}/books/{bookId} {
+      allow read, write: if request.auth != null
+                         && request.auth.uid == userId;
+    }
 
-      // No client-side write — ingestion service uses Admin SDK
+    // Chunks: shared catalog content, not user-owned.
+    // Read access requires the requesting user to have this book on their shelf.
+    // Write is restricted to server-side (Admin SDK bypasses rules).
+    match /chunks/{chunkId} {
+      allow read: if request.auth != null &&
+        exists(/databases/$(database)/documents/user_library/$(request.auth.uid)/books/$(resource.data.book_id));
+
       allow write: if false;
     }
   }
@@ -164,6 +200,10 @@ service cloud.firestore {
 
 A 20-book personal library uses ~7% of the free tier storage quota.
 Reads/writes are well within free tier limits for single-user usage.
+
+This is per **distinct** book, not per user — the global catalog (ADR-006) means
+a book uploaded by multiple users is stored once, so this estimate scales with
+library variety, not with user count.
 
 ---
 

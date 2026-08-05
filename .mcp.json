@@ -1,0 +1,25 @@
+{
+  "mcpServers": {
+    "firebase": {
+      "type": "stdio",
+      "command": "npx",
+      "args": [
+        "-y",
+        "firebase-tools@latest",
+        "experimental:mcp"
+      ],
+      "env": {}
+    },
+    "terraform": {
+      "type": "stdio",
+      "command": "docker",
+      "args": [
+        "run",
+        "-i",
+        "--rm",
+        "hashicorp/terraform-mcp-server:latest"
+      ],
+      "env": {}
+    }
+  }
+}
