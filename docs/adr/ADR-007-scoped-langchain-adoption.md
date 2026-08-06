@@ -1,7 +1,7 @@
 # ADR-007: Scoped LangChain Adoption for Provider Abstraction
 
 ## Status
-Accepted — partially supersedes ADR-002 ("RAG Framework: None")
+Accepted — partially supersedes ADR-002 ("RAG Framework: None"); scope expanded by ADR-011
 
 ## Date
 2026-08
@@ -35,6 +35,13 @@ principles.
 Adopt LangChain in exactly two leaf modules, chosen because their input/output
 contracts are already provider-agnostic and don't ripple into the rest of the
 system — nothing downstream needs to know LangChain is involved.
+
+**Update (ADR-011):** the same reasoning was extended to two more leaf,
+provider-facing call sites — the RAG evaluation judge and the metadata-extraction
+fallback, both originally given to Pydantic AI by ADR-009. The boundary itself
+(provider-facing leaf modules only, never chunking/retrieval/prompt construction)
+is unchanged; only the count of modules inside it grew, from two to four. See
+ADR-011.
 
 ### `ingestion/embedder.py`
 
@@ -94,7 +101,7 @@ loop — directly serving the provider-agnostic goal behind this ADR.
 - **`shared/retriever.py`** — the stable interface (ADR-001). This module
   isn't a provider-abstraction problem — Firestore isn't swapped via a generic
   interface here, the documented migration path is a deliberate rewrite to a
-  new file (`retriever_weaviate.py`). LangChain's vector store abstraction
+  new file (`retriever_<provider>.py`, ADR-001). LangChain's vector store abstraction
   also doesn't know about the global catalog / `user_library` dedup design
   (ADR-006); adopting it would mean losing the book-scoped, catalog-aware
   query this project actually needs.

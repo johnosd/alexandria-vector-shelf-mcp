@@ -19,6 +19,7 @@ alexandria-vector-shelf-mcp is a backend system with two independent microservic
 
 Strategic constraint: **everything must run within the Google Cloud / Firebase ecosystem.**
 One account, one console, one IAM, one billing dashboard. No external services.
+*(Amended by ADR-010 — see that ADR's note under "Platform" below.)*
 
 Additional constraints:
 - Minimum possible cost (single user, personal/portfolio project)
@@ -43,6 +44,14 @@ This eliminates Supabase, Fly.io, Railway, and any other external dependency.
 **Tradeoff accepted:** Firebase/Firestore has a steeper initial learning curve than
 Supabase for developers coming from a SQL background. This is offset by the benefit
 of mastering the GCP ecosystem end-to-end, which is valuable for portfolio positioning.
+
+**Update (ADR-010):** "No external services" is superseded by a GCP-first-not-GCP-only
+policy — a non-GCP dependency is acceptable when it clears a real-gain bar and gets
+written down, same discipline as any other architectural decision. This was already
+true in practice (OpenAI as embeddings fallback below, Pydantic AI in ADR-009); ADR-010
+makes it an explicit, testable rule instead of an implicit exception each time. See
+ADR-010 for the test and its first recorded precedent (Google Books/Open Library for
+metadata enrichment).
 
 ### Language: Python 3.11
 Rich AI/ML ecosystem. Mature asyncio support. First-class SDKs for Firebase Admin,
@@ -147,8 +156,10 @@ epub chapters (which are HTML documents internally). Both are mature and well-ma
 - **Pub/Sub:** Add Cloud Pub/Sub between the NeoReader app and Cloud Run ingestion
   when concurrent users require queue management. `process_epub()` becomes a Pub/Sub
   consumer with zero internal changes.
-- **Vector search:** Migrate from Firestore vector search to Weaviate (on GKE or cloud)
-  when hybrid search (BM25 + vector) becomes necessary. Only `retriever.py` changes.
+- **Vector search:** try a Firestore-only hybrid search path first (in-memory BM25 +
+  RRF, scoped per `book_id` — found viable, see backlog). If a database migration is
+  still needed, see ADR-001's migration path for current candidates (re-evaluated
+  against pricing at the time, not fixed to one vendor). Only `retriever.py` changes.
 - **MCP Server (Phase 5):** New `mcp/` module added on top of existing infrastructure.
   No changes to ingestion or chat services.
 - **Scale:** Cloud Run auto-scales horizontally. Firestore scales automatically.

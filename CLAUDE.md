@@ -6,7 +6,8 @@ This file provides guidance to Claude Code when working in this repository.
 
 - Name: alexandria-vector-shelf-mcp
 - Stack: Python 3.11, `uv` workspace (ADR-008), FastAPI services, Firebase/Firestore, LangChain
-  (scoped — ADR-007), Pydantic AI (scoped — ADR-009)
+  (scoped — ADR-007, expanded ADR-011). Pydantic AI is not currently used (narrowed out — ADR-011);
+  reserved for a future call site with a demonstrated need, not adopted preemptively.
 - Layout: `ingestion/` (epub → chunks → embeddings), `chat/` (streaming RAG chat API), `mcp/`
   (Model Context Protocol server, Phase 5), `shared/` (retriever, embedder, models — used by all
   three), `infra/` (Terraform)
@@ -45,11 +46,14 @@ No build step beyond `uv sync`. Services run via `docker-compose` (see `make dev
   through a model.
 - `ruff` (`select = ["E", "F", "I", "UP"]`) and `mypy` are configured in `pyproject.toml` — run
   both before considering a change done, not just at ship time.
-- LangChain is scoped to `ingestion/embedder.py` and `chat/streamer.py` only (ADR-007). Pydantic
-  AI is scoped to the evaluation notebook and the metadata-extraction fallback only (ADR-009).
-  Don't reach for either outside those scopes without registering the expansion as a decision
-  (see ADRs below) — this project deliberately avoids letting one library's surface creep in to
-  do a second library's job.
+- LangChain is scoped to `ingestion/embedder.py`, `chat/streamer.py`, the RAG eval judge, and the
+  metadata-extraction fallback (ADR-007, expanded ADR-011) — the default for any leaf module whose
+  job is talking to an external LLM provider. Pydantic AI is not currently used; only bring it back
+  for a specific call site with a demonstrated need (e.g. validation-aware auto-retry LangChain
+  can't reasonably cover), recorded as an ADR update, not adopted preemptively (ADR-011). Don't
+  reach for either outside those scopes without registering the expansion as a decision (see ADRs
+  below) — this project deliberately avoids letting one library's surface creep in to do a second
+  library's job.
 - Tests are marked `unit` (no external deps) or `integration` (needs live Firebase) —
   `pyproject.toml`'s `[tool.pytest.ini_options]` defines the markers. New tests need one of the
   two markers or `make test-unit`/`make test-integration` will silently skip them.

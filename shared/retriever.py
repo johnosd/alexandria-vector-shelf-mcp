@@ -13,9 +13,10 @@ The function signature is a contract that NEVER changes:
 
     retrieve(question_embedding, book_id, top_k) -> list[ChunkResult]
 
-The implementation underneath can be swapped (Firestore → Weaviate) by
-changing only this file. The chat service, MCP server, and all tests
-are completely unaware of this change.
+The implementation underneath can be swapped for a different vector database by
+changing only this file (candidates re-evaluated in ADR-001 — not fixed to one
+vendor). The chat service, MCP server, and all tests are completely unaware of
+this change.
 
 CONCEPT: Firestore KNN vector search
 Firestore's find_nearest() performs a K-nearest neighbor (KNN) search
@@ -28,17 +29,22 @@ This requires a composite vector index created in Phase 1 setup:
   gcloud firestore indexes composite create \
     --collection-group=chunks \
     --field-config=order=ASCENDING,field-path="book_id" \
-    --field-config=field-path="embedding",vector-config='{"dimension":"1536","flat":"{}"}'
+    --field-config=field-path="embedding",vector-config='{"dimension":"768","flat":"{}"}'
 
 CURRENT IMPLEMENTATION: Firestore vector search (native KNN)
-FUTURE IMPLEMENTATION: Weaviate (when hybrid BM25+vector search is needed)
-  → See ADR-001 migration path and notebooks/04_firestore_vs_weaviate.ipynb
+FUTURE IMPLEMENTATION: only if hybrid search/ANN-scale cost becomes a real
+  need — try an in-memory BM25 hybrid path on Firestore first (see backlog).
+  If a database switch is still needed, re-evaluate candidates against
+  current pricing (Qdrant Cloud and MongoDB Atlas were the strongest as of
+  2026-08 — not Weaviate, see ADR-001 for why).
+  → See ADR-001 migration path and notebooks/04_firestore_vs_vector_db.ipynb
 """
 
 from __future__ import annotations
 
 import logging
 
+from google.cloud.firestore_v1.base_query import FieldFilter
 from google.cloud.firestore_v1.base_vector_query import DistanceMeasure
 from google.cloud.firestore_v1.vector import Vector
 
@@ -89,7 +95,7 @@ async def retrieve(
     collection = db.collection(CHUNKS_COLLECTION)
 
     vector_query = collection\
-        .where("book_id", "==", book_id)\
+        .where(filter=FieldFilter("book_id", "==", book_id))\
         .find_nearest(
             vector_field="embedding",
             query_vector=Vector(question_embedding),

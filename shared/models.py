@@ -15,18 +15,16 @@ All services import from this file. Schema changes happen in one place.
 from __future__ import annotations
 
 from datetime import datetime
-from enum import Enum
-from uuid import UUID
+from enum import StrEnum
 
 from pydantic import BaseModel, Field
-
 
 # ---------------------------------------------------------------------------
 # Enums
 # ---------------------------------------------------------------------------
 
 
-class BookStatus(str, Enum):
+class BookStatus(StrEnum):
     """
     Lifecycle states of a book in the system.
 
@@ -129,7 +127,9 @@ class ChunkCreate(BaseModel):
 
     book_id: str
     content: str
-    embedding: list[float]          # output of embedding model (1536 or 768 floats)
+    embedding: list[float]          # output of embedding model (768 floats, Vertex AI
+                                     # text-embedding-004 — ADR-002; 1536 if the OpenAI
+                                     # fallback is used, requires reindexing, ADR-001)
     chunk_index: int                # 0-based position in the book
     chapter: str | None = None      # chapter title if extractable
 
@@ -140,8 +140,9 @@ class ChunkResult(BaseModel):
 
     CONCEPT: This is THE stable interface of the entire system.
     The chat service, MCP server, prompt builder, and RAG evaluator all work
-    with ChunkResult. The retriever implementation (Firestore today, Weaviate
-    tomorrow) must always return list[ChunkResult]. If this contract holds,
+    with ChunkResult. The retriever implementation (Firestore today, a different
+    vector database possibly tomorrow — see ADR-001) must always return
+    list[ChunkResult]. If this contract holds,
     nothing else in the system needs to change when the database is swapped.
 
     Fields:

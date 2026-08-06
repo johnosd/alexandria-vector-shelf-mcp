@@ -147,7 +147,7 @@ gcloud firestore indexes composite create \
   --collection-group=chunks \
   --query-scope=COLLECTION \
   --field-config=order=ASCENDING,field-path="book_id" \
-  --field-config=field-path="embedding",vector-config='{"dimension":"1536","flat":"{}"}' \
+  --field-config=field-path="embedding",vector-config='{"dimension":"768","flat":"{}"}' \
   --database="(default)"
 ```
 
@@ -158,10 +158,12 @@ gcloud firestore indexes composite list
 
 Wait until status shows `READY` before proceeding to Phase 2.
 
-**Note on dimension:** `1536` matches `text-embedding-3-small` (OpenAI) and can also be
-used with Vertex AI `text-embedding-004` (which supports configurable output dimensions).
-If you later switch to a different model with a different dimension, you must delete this
-index and create a new one.
+**Note on dimension:** `768` matches Vertex AI `text-embedding-004`, the primary
+embedding provider (ADR-002). If you use the OpenAI fallback (`text-embedding-3-small`,
+1536 dimensions) instead, change this to `1536` — the index dimension must always match
+whichever provider is actually generating the stored embeddings. Switching providers
+after the index is created means deleting it and creating a new one at the new
+dimension, and re-embedding every stored chunk.
 
 ---
 

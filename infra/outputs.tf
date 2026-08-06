@@ -55,7 +55,7 @@ output "next_steps" {
        gcloud firestore indexes composite create \
          --collection-group=chunks \
          --field-config=order=ASCENDING,field-path="book_id" \
-         --field-config=field-path="embedding",vector-config='{"dimension":"1536","flat":"{}"}'
+         --field-config=field-path="embedding",vector-config='{"dimension":"768","flat":"{}"}'
 
     3. Deploy Firebase Security Rules (not managed by Terraform):
        firebase deploy --only firestore:rules,storage

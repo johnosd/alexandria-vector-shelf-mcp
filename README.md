@@ -9,6 +9,28 @@ patterns — running entirely on Google Cloud Platform / Firebase.
 
 ---
 
+## Current implementation status
+
+This README documents the full target architecture (Phases 1–5). As of now, only a
+slice of it is actually built:
+
+| Component | Status |
+|---|---|
+| `shared/` — `models.py`, `db.py`, `retriever.py` | ✅ implemented |
+| `shared/embedder.py` | ❌ not started (referenced by ADR-007, no file yet) |
+| `ingestion/` (parser, chunker, embedder, store, library_manager, FastAPI app) | ❌ empty directory, no files |
+| `chat/` (FastAPI app, prompt builder, streamer) | ❌ empty directory, no files |
+| `mcp/` (server, tools, resources, prompts) | ❌ empty directory, no files |
+| `notebooks/` | ❌ empty — see `docs/training/` for the notebooks that do exist |
+| `tests/` | ❌ empty — no test suite yet despite `unit`/`integration` markers being configured |
+| `docker-compose.yml` | ❌ referenced by `make dev` but does not exist |
+| `infra/` (Terraform) | ⚠️ root module (`main.tf`) references `./modules/{iam,storage,firestore,cloud_run}`, which don't exist at that path — `terraform init`/`plan` would fail today |
+
+Everything below the line describes the intended end state, not what runs today.
+Treat the "Repository structure" and "Roadmap" sections as a design target.
+
+---
+
 ## What this project is
 
 `alexandria-vector-shelf-mcp` is a backend system that processes epub books and enables semantic
@@ -86,20 +108,24 @@ No rewriting, no duplication.
 
 ## Design principles
 
-**100% Google Cloud.** Every service runs on Firebase or GCP. One account, one console,
-one IAM, one billing dashboard. No external dependencies.
+**GCP-first, not GCP-only.** Every service defaults to Firebase or GCP — one account,
+one console, one IAM, one billing dashboard. A non-GCP dependency is accepted when it
+clears a real, written-down gain (ADR-010), e.g. Google Books/Open Library for book
+metadata lookup. The default is single-vendor simplicity; exceptions are deliberate,
+not accidental.
 
 **Separation of concerns.** The ingestion pipeline and the chat service are independent
 microservices. They share data through Firestore, not through direct coupling.
 
 **Retriever as the stable interface.** `shared/retriever.py` defines a typed contract
 (`list[ChunkResult]`) that never changes. The chat service and the MCP server both call it.
-The underlying database implementation can be swapped (Firestore → Weaviate) without
-touching anything else.
+The underlying database implementation can be swapped without touching anything else —
+see ADR-001's migration path for current candidates if that's ever needed.
 
 **Built to migrate.** Every architectural decision is documented in an ADR with a migration path.
-Pub/Sub can be added before Cloud Run without changing `process_epub()`. Weaviate can replace
-Firestore vector search by changing one file.
+Pub/Sub can be added before Cloud Run without changing `process_epub()`. A different vector
+database can replace Firestore vector search by changing one file, `shared/retriever.py`
+(ADR-001) — though a Firestore-only hybrid search path should be tried first (see backlog).
 
 **Documented as it is built.** Every non-obvious decision has an ADR. Every concept introduced
 in the code has a corresponding notebook. The project is designed to be readable by someone
@@ -112,10 +138,10 @@ learning RAG engineering.
 ```
 alexandria-vector-shelf-mcp/
 │
-├── ingestion/                  # Microservice 1 — Google Cloud Run (serverless)
+├── ingestion/                  # ❌ EMPTY — Microservice 1, planned for Google Cloud Run (serverless)
 │   ├── main.py                 # FastAPI entrypoint — POST /library/books
 │   ├── library_manager.py      # dedup gate: file hash → ISBN → content hash → fuzzy match (ADR-006)
-│   │                           # + Pydantic AI metadata fallback when OPF is unusable (ADR-009)
+│   │                           # + LangChain metadata fallback when OPF is unusable (ADR-011)
 │   ├── parser.py               # epub → clean text (EbookLib + BeautifulSoup4)
 │   ├── chunker.py              # text → overlapping chunks
 │   ├── embedder.py             # chunks → Vertex AI / OpenAI embeddings (LangChain, ADR-007)
@@ -123,14 +149,14 @@ alexandria-vector-shelf-mcp/
 │   ├── pyproject.toml          # uv workspace member, depends on shared (ADR-008)
 │   └── Dockerfile
 │
-├── chat/                       # Microservice 2 — Google Cloud Run (always-on)
+├── chat/                       # ❌ EMPTY — Microservice 2, planned for Google Cloud Run (always-on)
 │   ├── main.py                 # FastAPI entrypoint — GET /chat (SSE)
 │   ├── prompt.py               # chunks + question → RAG prompt
 │   ├── streamer.py             # prompt → Gemini Flash → SSE stream (LangChain, ADR-007)
 │   ├── pyproject.toml          # uv workspace member, depends on shared (ADR-008)
 │   └── Dockerfile
 │
-├── mcp/                        # Phase 5 — MCP Server
+├── mcp/                        # ❌ EMPTY — Phase 5, MCP Server
 │   ├── server.py               # MCP SDK entrypoint
 │   ├── tools.py                # wraps shared/retriever.py as MCP tools
 │   ├── resources.py            # exposes book library as MCP resources
@@ -138,25 +164,26 @@ alexandria-vector-shelf-mcp/
 │   ├── pyproject.toml          # uv workspace member, depends on shared (ADR-008)
 │   └── Dockerfile
 │
-├── shared/                     # Shared logic — imported by all services
+├── shared/                     # ✅ IMPLEMENTED — shared logic, imported by all services
 │   ├── __init__.py
 │   ├── pyproject.toml          # real uv workspace package (ADR-008)
 │   ├── db.py                   # Firestore client (singleton)
 │   ├── models.py               # Pydantic schemas (ChunkResult, Book, etc.)
-│   └── retriever.py            # THE stable interface — never changes signature
+│   ├── retriever.py            # THE stable interface — never changes signature
+│   └── embedder.py             # ❌ not written yet (ADR-007 scopes LangChain here)
 │
-├── notebooks/                  # Learning artifacts — one per concept
+├── notebooks/                  # ❌ EMPTY — see docs/training/ for the notebooks that exist today
 │   ├── 01_embeddings_explained.ipynb
 │   ├── 02_chunking_strategies.ipynb
 │   ├── 03_retrieval_evaluation.ipynb
-│   ├── 04_firestore_vs_weaviate.ipynb
+│   ├── 04_firestore_vs_vector_db.ipynb
 │   └── 05_mcp_demo.ipynb
 │
 ├── docs/
 │   ├── schema.md               # Firestore collection design
 │   ├── DEVELOPMENT.md          # recommended MCP servers for AI-assisted dev on this repo
 │   ├── BIBLIOGRAPHY.md         # learning resources + technical reference, by phase/ADR
-│   ├── ARCHITECTURE.md         # Deep dive into design decisions
+│   ├── training/                # actual learning notebooks (chunking, embeddings) + reports
 │   ├── comparisons/
 │   │   └── GCP_vs_AWS.md       # Full stack comparison GCP vs AWS
 │   └── adr/
@@ -168,17 +195,21 @@ alexandria-vector-shelf-mcp/
 │       ├── ADR-006-library-deduplication.md
 │       ├── ADR-007-scoped-langchain-adoption.md
 │       ├── ADR-008-uv-dependency-management.md
-│       └── ADR-009-pydantic-ai-structured-outputs.md
+│       ├── ADR-009-pydantic-ai-structured-outputs.md
+│       ├── ADR-010-external-dependency-policy.md
+│       └── ADR-011-langchain-default-pydantic-ai-narrowed.md
 │
-├── tests/
+├── tests/                      # ❌ EMPTY — no test suite yet
 │   ├── test_parser.py
 │   ├── test_chunker.py
 │   ├── test_embedder.py
 │   ├── test_retriever.py
 │   └── test_integration.py
 │
+├── infra/                      # ⚠️ root module references ./modules/* which don't exist at that path
+│
 ├── .env.example
-├── docker-compose.yml
+├── docker-compose.yml          # ❌ referenced by `make dev` but not yet created
 ├── Makefile
 ├── pyproject.toml              # uv workspace root (ADR-008)
 ├── uv.lock                     # single lockfile for the whole workspace
@@ -209,7 +240,7 @@ alexandria-vector-shelf-mcp/
 | Embeddings client | LangChain (`Embeddings` interface) | provider-agnostic Vertex AI ↔ OpenAI swap, batching/retry built in — scoped to `embedder.py` (ADR-007) |
 | Chat LLM client | LangChain (`BaseChatModel` interface) | provider-agnostic streaming call to Gemini Flash — scoped to `chat/streamer.py` (ADR-007) |
 | Dependency management | uv workspaces | one lockfile across ingestion/chat/mcp/shared — no cross-service version drift (ADR-008) |
-| Structured LLM output | Pydantic AI | typed, validated output for the RAG eval judge and the metadata-extraction fallback — not chat/embedding (ADR-009) |
+| Structured LLM output | LangChain (`with_structured_output()`) | typed output for the RAG eval judge and the metadata-extraction fallback, same `BaseChatModel` pattern as embedding/chat (ADR-011, narrows ADR-009 — Pydantic AI reserved for a future demonstrated need) |
 | MCP server framework | FastMCP | official SDK's built-in `FastMCP` for local stdio mode; standalone `fastmcp` package as the candidate if remote mode is ever built (ADR-005) |
 | Containerization | Docker | consistent environments |
 
@@ -252,7 +283,8 @@ firestore/
 └── chunks/{chunk_id}                  ← global catalog, not user-owned
     ├── book_id: string
     ├── content: string
-    ├── embedding: Vector(1536)        ← Firestore native vector type
+    ├── embedding: Vector(768)         ← Firestore native vector type (Vertex AI
+    │                                     text-embedding-004 dimension, ADR-002)
     ├── chunk_index: number
     ├── chapter: string | null
     └── created_at: timestamp
@@ -264,7 +296,7 @@ gcloud firestore indexes composite create \
   --collection-group=chunks \
   --query-scope=COLLECTION \
   --field-config=order=ASCENDING,field-path="book_id" \
-  --field-config=field-path="embedding",vector-config='{"dimension":"1536","flat":"{}"}'
+  --field-config=field-path="embedding",vector-config='{"dimension":"768","flat":"{}"}'
 ```
 
 ---
@@ -322,33 +354,40 @@ async def retrieve(
 
 ## Roadmap
 
-### Phase 1 — Foundation `week 1`
+### Phase 1 — Foundation `week 1` — 🔶 in progress
 Firebase project setup, Firestore collection design, vector index creation,
 repository structure, first two ADRs.
 
 **Deliverables:** Firebase project configured, Firestore indexes created,
 repo structure, README, ADR-001, ADR-002, `.env.example`, `PHASE_1_SETUP.md`
 
-### Phase 2 — Ingestion Service `week 2–3`
+**Done so far:** repo structure, README, ADRs, `.env.example`, `PHASE_1_SETUP.md`,
+`shared/models.py` + `shared/db.py` + `shared/retriever.py`.
+**Not yet verified from the repo:** whether the Firebase project, Firestore vector
+index, and security rules described in `PHASE_1_SETUP.md` have actually been created
+on GCP — that state lives outside this repository.
+
+### Phase 2 — Ingestion Service `week 2–3` — ⬜ not started
 Complete epub processing pipeline deployed to Cloud Run, including the
 Library Manager dedup gate in front of it.
 
 **Deliverables:** Cloud Run deployed, pipeline testable via `curl`,
 `notebooks/02_chunking_strategies.ipynb`, ADR-003, ADR-006
 
-### Phase 3 — Chat Service `week 4`
+### Phase 3 — Chat Service `week 4` — ⬜ not started
 Retrieval and streaming chat API with stable retriever interface.
 
 **Deliverables:** Cloud Run always-on deployed, SSE streaming end-to-end,
 retriever interface abstracted for future migration, ADR-004, ADR-007
 
-### Phase 4 — Hardening + Docs `week 5`
+### Phase 4 — Hardening + Docs `week 5` — ⬜ not started
 Integration tests, RAG evaluation, full documentation.
 
 **Deliverables:** integration tests, evaluation notebooks,
-`ARCHITECTURE.md`, Weaviate migration guide, `docker-compose.yml`
+vector-database migration guide (candidates re-evaluated per ADR-001, not fixed to one
+vendor), `docker-compose.yml`
 
-### Phase 5 — MCP Server `week 6–7`
+### Phase 5 — MCP Server `week 6–7` — ⬜ not started
 MCP SDK wrapper exposing retrieval as tools for any LLM agent.
 
 **Deliverables:** MCP server tested with Claude Desktop,
@@ -361,10 +400,14 @@ MCP SDK wrapper exposing retrieval as tools for any LLM agent.
 ```bash
 cp .env.example .env        # fill in your Firebase and Google Cloud credentials
 uv sync                     # install the whole workspace into one .venv (ADR-008)
-docker-compose up           # start all services locally
-make test                   # run all tests
-make ingest EPUB_PATH=...   # test the /library/books pipeline via curl (ADR-006)
+uv run pytest tests/        # run the test suite — currently empty, no tests written yet
 ```
+
+`docker-compose up` and `make ingest`/`make chat` are not usable yet — they depend on
+`docker-compose.yml` and the `ingestion`/`chat` services, none of which exist yet
+(see "Current implementation status" above). Today, `shared/` can only be exercised
+by importing it directly from a Python shell or a script, against a real Firebase
+project (there's no mock/emulator wiring yet).
 
 ---
 
@@ -376,9 +419,12 @@ GOOGLE_CLOUD_PROJECT=
 FIREBASE_STORAGE_BUCKET=
 GOOGLE_APPLICATION_CREDENTIALS=./service-account.json   # local dev only
 
-# Embeddings (choose one)
-OPENAI_API_KEY=                          # option A: OpenAI embeddings
-VERTEX_AI_LOCATION=us-central1           # option B: Vertex AI embeddings
+# Embeddings (choose one — see ADR-002; the Firestore vector index is built for
+# whichever dimension is primary and is expensive to change afterward, ADR-001)
+EMBEDDING_PROVIDER=vertex_ai             # option A (primary): Vertex AI, 768 dimensions
+VERTEX_AI_LOCATION=us-central1
+# EMBEDDING_PROVIDER=openai              # option B (fallback): OpenAI, 1536 dimensions
+# OPENAI_API_KEY=
 
 # LLM
 GEMINI_API_KEY=                          # or use Application Default Credentials

@@ -8,6 +8,9 @@ requires-python = ">=3.11"
 # pyproject.toml (ADR-008) — an empty directory breaks `uv sync`.
 members = ["shared"]
 
+[dependency-groups]
+dev = ["ruff>=0.6", "mypy>=1.11"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 markers = [

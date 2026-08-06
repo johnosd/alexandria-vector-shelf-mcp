@@ -36,6 +36,8 @@ import firebase_admin
 from firebase_admin import credentials, firestore, storage
 from google.cloud.firestore_v1 import AsyncClient
 
+from shared.models import BookRecord
+
 # ---------------------------------------------------------------------------
 # Firebase app initialization — happens once at module import time
 # ---------------------------------------------------------------------------
@@ -109,7 +111,7 @@ USER_LIBRARY_COLLECTION = os.environ.get("FIRESTORE_USER_LIBRARY_COLLECTION", "u
 # ---------------------------------------------------------------------------
 
 
-async def get_book(book_id: str) -> dict | None:
+async def get_book(book_id: str) -> BookRecord | None:
     """
     Fetches a single book document by ID.
 
@@ -120,7 +122,7 @@ async def get_book(book_id: str) -> dict | None:
     doc = await db.collection(BOOKS_COLLECTION).document(book_id).get()
     if not doc.exists:
         return None
-    return {"id": doc.id, **doc.to_dict()}
+    return BookRecord(id=doc.id, **doc.to_dict())
 
 
 async def update_book_status(

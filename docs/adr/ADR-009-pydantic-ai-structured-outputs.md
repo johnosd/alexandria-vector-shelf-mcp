@@ -1,7 +1,7 @@
 # ADR-009: Pydantic AI for Structured LLM Outputs
 
 ## Status
-Accepted
+Accepted — narrowed by ADR-011
 
 ## Date
 2026-08
@@ -29,6 +29,13 @@ problem than ADR-007 solved:
    a wrong ISBN — a case ADR-006 didn't address. Tier 1 (ISBN) and Tier 3
    (fuzzy title/author) both degrade to no signal at all in that case, which
    currently just means the book always gets treated as new.
+
+**Update (ADR-011):** both use cases below were later moved to LangChain's
+`with_structured_output()` instead — the project's preference shifted to
+defaulting to LangChain wherever it can do the job without a real downside,
+reserving Pydantic AI for a call site with a demonstrated need for its
+validation-aware auto-retry. The reasoning that follows explains why Pydantic
+AI was chosen originally; see ADR-011 for why it was narrowed back out.
 
 `shared/models.py` already frames Pydantic as the project's schema contract
 ("Pydantic validates data at runtime... raises a clear error at the boundary

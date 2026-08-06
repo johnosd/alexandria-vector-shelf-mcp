@@ -523,7 +523,7 @@ gcloud firestore indexes composite create \
   --collection-group=chunks \
   --query-scope=COLLECTION \
   --field-config=order=ASCENDING,field-path="book_id" \
-  --field-config=field-path="embedding",vector-config='{"dimension":"1536","flat":"{}"}' \
+  --field-config=field-path="embedding",vector-config='{"dimension":"768","flat":"{}"}' \
   --database="(default)" \
   --project=SEU-PROJECT-ID
 ```

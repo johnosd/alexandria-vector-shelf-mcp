@@ -177,6 +177,15 @@ match /chunks/{chunkId} {
 The chunk read rule can no longer check a denormalized `user_id` (chunks don't
 have one anymore) — it checks shelf membership instead, via `exists()`.
 
+### Deletion is out of scope for the live service
+
+No user-facing action ever deletes a `books/{book_id}` catalog entry or its
+`chunks`. If catalog cleanup is ever needed (e.g. an orphaned or unused book),
+it happens via an internal/admin operation outside the request path — never
+triggered by a user request. This keeps the dedup guarantees above simple:
+nothing in the live service needs to reason about a catalog book disappearing
+out from under a `user_library` reference or an in-flight retrieval.
+
 ## Alternatives Considered
 
 ### Per-user deduplication only

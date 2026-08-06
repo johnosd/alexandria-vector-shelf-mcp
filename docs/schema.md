@@ -97,7 +97,9 @@ chunks/
   {chunk_id}/
     book_id:       string          ← reference to books/{book_id}
     content:       string          ← raw text of this chunk
-    embedding:     Vector(1536)    ← Firestore native vector type
+    embedding:     Vector(768)     ← Firestore native vector type, dimension of
+                                      the primary embedding provider (Vertex AI
+                                      text-embedding-004, ADR-002)
     chunk_index:   number          ← 0-based position in the original book
     chapter:       string | null   ← chapter title if extractable from epub
     created_at:    timestamp
@@ -122,15 +124,18 @@ gcloud firestore indexes composite create \
   --collection-group=chunks \
   --query-scope=COLLECTION \
   --field-config=order=ASCENDING,field-path="book_id" \
-  --field-config=field-path="embedding",vector-config='{"dimension":"1536","flat":"{}"}'
+  --field-config=field-path="embedding",vector-config='{"dimension":"768","flat":"{}"}'
 ```
 
 This creates a composite index that:
 1. Filters by `book_id` (equality filter)
 2. Performs KNN vector search on `embedding`
 
-**Important:** The `dimension` value (1536) must match the embedding model output.
-If you change models, you must delete the index and recreate it with the new dimension.
+**Important:** The `dimension` value (768) matches the primary embedding provider's
+output — Vertex AI `text-embedding-004` (ADR-002). If you switch to the OpenAI
+fallback (`text-embedding-3-small`, 1536 dimensions) or any other model, you must
+delete the index and recreate it with the new dimension — and re-embed every
+stored chunk, since vectors from two different models aren't comparable.
 
 ### Standard indexes (auto-created by Firestore for simple queries)
 
@@ -193,12 +198,12 @@ service cloud.firestore {
 | Characters per page | ~1800 |
 | Total characters per book | ~540,000 |
 | Chunks per book (500 chars, 50 overlap) | ~600 |
-| Embedding size per chunk | 1536 floats × 4 bytes = ~6KB |
-| Storage per book (chunks only) | ~3.6MB |
-| 20 books in library | ~72MB |
+| Embedding size per chunk | 768 floats × 4 bytes = ~3KB |
+| Storage per book (chunks only) | ~1.8MB |
+| 20 books in library | ~36MB |
 | Firestore free tier (Spark) | 1GB storage |
 
-A 20-book personal library uses ~7% of the free tier storage quota.
+A 20-book personal library uses ~3.5% of the free tier storage quota.
 Reads/writes are well within free tier limits for single-user usage.
 
 This is per **distinct** book, not per user — the global catalog (ADR-006) means
